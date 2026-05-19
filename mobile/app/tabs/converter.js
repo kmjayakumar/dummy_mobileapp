@@ -14,10 +14,6 @@ import Button from '../../components/Button';
 import Card from '../../components/Card';
 import ErrorMessage from '../../components/ErrorMessage';
 import Colors from '../../constants/colors';
-import {
-  convertOpusToWav,
-  convertWavToMp3,
-} from '../../services/audioConverterService';
 
 const STAGE = {
   IDLE: 'idle',
@@ -25,11 +21,26 @@ const STAGE = {
   MP3: 'mp3',
 };
 
+/** Step 1: UI + file picker only. FFmpeg wired in Step 2. */
+function simulateConversion(durationMs, onProgress) {
+  return new Promise((resolve) => {
+    const steps = 10;
+    const interval = durationMs / steps;
+    let current = 0;
+    const timer = setInterval(() => {
+      current += 1;
+      onProgress(Math.round((current / steps) * 100));
+      if (current >= steps) {
+        clearInterval(timer);
+        resolve();
+      }
+    }, interval);
+  });
+}
+
 export default function ConverterScreen() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [wavPath, setWavPath] = useState(null);
-  const [wavFfmpegPath, setWavFfmpegPath] = useState(null);
-  const [outputBaseName, setOutputBaseName] = useState(null);
   const [mp3Path, setMp3Path] = useState(null);
   const [activeStage, setActiveStage] = useState(STAGE.IDLE);
   const [progress, setProgress] = useState(0);
@@ -41,8 +52,6 @@ export default function ConverterScreen() {
 
   const resetOutputs = useCallback(() => {
     setWavPath(null);
-    setWavFfmpegPath(null);
-    setOutputBaseName(null);
     setMp3Path(null);
     setSuccessMessage('');
   }, []);
@@ -112,25 +121,12 @@ export default function ConverterScreen() {
     setProgress(0);
 
     try {
-      const result = await convertOpusToWav(
-        selectedFile.uri,
-        selectedFile.name,
-        setProgress,
-      );
-      setWavPath(result.displayPath);
-      setWavFfmpegPath(result.path);
-      setOutputBaseName(result.baseName);
-      setMp3Path(null);
-      setSuccessMessage('WAV saved locally. Ready for KineMaster.');
+      await simulateConversion(2200, setProgress);
+      const mockPath = `[Step 2] ${selectedFile.name.replace(/\.opus$/i, '')}.wav`;
+      setWavPath(mockPath);
+      setSuccessMessage('WAV conversion UI flow complete. FFmpeg runs in Step 2.');
     } catch (err) {
-      const msg = err.message || 'WAV conversion failed.';
-      if (msg.includes('native module') || msg.includes('FFmpegKit')) {
-        setError(
-          'FFmpeg native module not found. Build a dev client: npx expo run:android (Expo Go will not work).',
-        );
-      } else {
-        setError(msg);
-      }
+      setError(err.message || 'WAV conversion failed.');
     } finally {
       setActiveStage(STAGE.IDLE);
       setProgress(0);
@@ -138,8 +134,8 @@ export default function ConverterScreen() {
   };
 
   const convertToMp3 = async () => {
-    if (!wavFfmpegPath || isBusy) {
-      if (!wavFfmpegPath) setError('Convert to WAV first.');
+    if (!wavPath || isBusy) {
+      if (!wavPath) setError('Convert to WAV first.');
       return;
     }
 
@@ -149,18 +145,13 @@ export default function ConverterScreen() {
     setProgress(0);
 
     try {
-      const result = await convertWavToMp3(wavFfmpegPath, outputBaseName, setProgress);
-      setMp3Path(result.displayPath);
-      setSuccessMessage('MP3 saved locally at 192 kbps. Ready to share.');
+      await simulateConversion(1800, setProgress);
+      const baseName = selectedFile.name.replace(/\.opus$/i, '');
+      const mockPath = `[Step 2] ${baseName}.mp3`;
+      setMp3Path(mockPath);
+      setSuccessMessage('MP3 conversion UI flow complete. FFmpeg runs in Step 2.');
     } catch (err) {
-      const msg = err.message || 'MP3 conversion failed.';
-      if (msg.includes('native module') || msg.includes('FFmpegKit')) {
-        setError(
-          'FFmpeg native module not found. Build a dev client: npx expo run:android (Expo Go will not work).',
-        );
-      } else {
-        setError(msg);
-      }
+      setError(err.message || 'MP3 conversion failed.');
     } finally {
       setActiveStage(STAGE.IDLE);
       setProgress(0);
@@ -192,9 +183,9 @@ export default function ConverterScreen() {
         </View>
 
         <View style={styles.stepBanner}>
-          <Ionicons name="hardware-chip-outline" size={18} color={Colors.info} />
+          <Ionicons name="information-circle-outline" size={18} color={Colors.info} />
           <Text style={styles.stepBannerText}>
-            FFmpeg runs on-device (libopus @ 48 kHz, MP3 192k). Use a dev build — not Expo Go.
+            Step 1: UI only. Real FFmpeg conversion is added in Step 2.
           </Text>
         </View>
 
@@ -288,7 +279,7 @@ export default function ConverterScreen() {
               onPress={convertToMp3}
               variant="secondary"
               loading={activeStage === STAGE.MP3}
-              disabled={!wavFfmpegPath || isBusy}
+              disabled={!wavPath || isBusy}
               style={styles.actionBtn}
             />
           </View>
@@ -296,8 +287,8 @@ export default function ConverterScreen() {
 
         {(wavPath || mp3Path) ? (
           <Card style={styles.section} elevated>
-            <Text style={styles.sectionTitle}>Saved files</Text>
-            <Text style={styles.sectionHint}>Stored in app documents/converted/</Text>
+            <Text style={styles.sectionTitle}>Output paths</Text>
+            <Text style={styles.sectionHint}>Real paths appear after Step 2 FFmpeg setup</Text>
 
             {wavPath ? (
               <OutputRow
@@ -320,7 +311,7 @@ export default function ConverterScreen() {
         ) : null}
 
         <Card style={styles.pipelineCard}>
-          <Text style={styles.pipelineTitle}>Pipeline</Text>
+          <Text style={styles.pipelineTitle}>Pipeline (Step 2)</Text>
           <PipelineStep step="1" label="Opus → WAV" detail="libopus + aresample=async=1 @ 48 kHz" done={Boolean(wavPath)} />
           <PipelineStep step="2" label="WAV → MP3" detail="192 kbps" done={Boolean(mp3Path)} last />
         </Card>
