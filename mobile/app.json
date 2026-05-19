@@ -23,14 +23,27 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0f0f0f"
       },
-      "package": "com.yourcompany.fullstackapp"
+      "package": "com.yourcompany.fullstackapp",
+      "minSdkVersion": 24
     },
     "web": {
       "bundler": "metro",
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      [
+        "@config-plugins/ffmpeg-kit-react-native",
+        {
+          "package": "audio",
+          "android": {
+            "package": "audio"
+          },
+          "ios": {
+            "package": "audio"
+          }
+        }
+      ]
     ],
     "scheme": "fullstackapp",
     "experiments": {
