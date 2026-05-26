@@ -23,8 +23,7 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0f0f0f"
       },
-      "package": "com.yourcompany.fullstackapp",
-      "minSdkVersion": 24
+      "package": "com.yourcompany.fullstackapp"
     },
     "web": {
       "bundler": "metro",
@@ -32,6 +31,14 @@
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 24
+          }
+        }
+      ],
       [
         "@config-plugins/ffmpeg-kit-react-native",
         {
@@ -43,7 +50,8 @@
             "package": "audio"
           }
         }
-      ]
+      ],
+      "expo-build-properties"
     ],
     "scheme": "fullstackapp",
     "experiments": {

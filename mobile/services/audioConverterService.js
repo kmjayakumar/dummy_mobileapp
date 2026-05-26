@@ -1,6 +1,6 @@
 import { NativeModules } from 'react-native';
 import * as FileSystem from 'expo-file-system';
-import { FFmpegKit, ReturnCode } from 'ffmpeg-kit-react-native';
+// import { FFmpegKit, ReturnCode } from 'ffmpeg-kit-react-native';
 
 const OUTPUT_DIR = `${FileSystem.documentDirectory}converted/`;
 
