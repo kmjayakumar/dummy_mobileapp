@@ -253,6 +253,48 @@ export default function ConverterScreen() {
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   };
 
+  const convertToMp3 = async (wavResult = wavOutput) => {
+    if (!wavResult?.wavPath || isBusy) {
+      if (!wavResult?.wavPath) setError('Convert to WAV first.');
+      return;
+    }
+
+    setError('');
+    setSuccessMessage('');
+    setActiveStage(STAGE.MP3);
+    setProgress(0);
+
+    try {
+      const result = await convertWavToMp3(
+        wavResult,
+        selectedFile.name,
+        setProgress
+      );
+      setMp3Output(result);
+      setSuccessMessage(`MP3 saved · ${result.fileName} (${formatFileSize(result.size)})`);
+    } catch (err) {
+      setError(err.message || 'MP3 conversion failed.');
+    } finally {
+      setActiveStage(STAGE.IDLE);
+      setProgress(0);
+    }
+  };
+
+  const promptConvertToMp3 = (wavResult) => {
+    Alert.alert(
+      'WAV conversion complete',
+      'Proceed with Convert to MP3?',
+      [
+        { text: 'Not now', style: 'cancel' },
+        {
+          text: 'Convert to MP3',
+          onPress: () => convertToMp3(wavResult),
+        },
+      ],
+      { cancelable: true }
+    );
+  };
+
   const convertToWav = async () => {
     if (!hasFile || isBusy) return;
 
@@ -270,35 +312,9 @@ export default function ConverterScreen() {
       );
       setWavOutput(result);
       setSuccessMessage(`WAV saved · ${result.fileName} (${formatFileSize(result.size)})`);
+      promptConvertToMp3(result);
     } catch (err) {
       setError(err.message || 'WAV conversion failed.');
-    } finally {
-      setActiveStage(STAGE.IDLE);
-      setProgress(0);
-    }
-  };
-
-  const convertToMp3 = async () => {
-    if (!wavOutput?.uri || isBusy) {
-      if (!wavOutput?.uri) setError('Convert to WAV first.');
-      return;
-    }
-
-    setError('');
-    setSuccessMessage('');
-    setActiveStage(STAGE.MP3);
-    setProgress(0);
-
-    try {
-      const result = await convertWavToMp3(
-        wavOutput,
-        selectedFile.name,
-        setProgress
-      );
-      setMp3Output(result);
-      setSuccessMessage(`MP3 saved · ${result.fileName} (${formatFileSize(result.size)})`);
-    } catch (err) {
-      setError(err.message || 'MP3 conversion failed.');
     } finally {
       setActiveStage(STAGE.IDLE);
       setProgress(0);
@@ -438,7 +454,7 @@ export default function ConverterScreen() {
               onPress={convertToMp3}
               variant="secondary"
               loading={activeStage === STAGE.MP3}
-              disabled={!wavOutput?.uri || isBusy}
+              disabled={!wavOutput?.wavPath || isBusy}
               style={styles.actionBtn}
             />
           </View>
