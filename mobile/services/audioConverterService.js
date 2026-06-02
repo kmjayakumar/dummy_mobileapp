@@ -1,17 +1,13 @@
-import { NativeModules } from 'react-native';
 import * as FileSystem from 'expo-file-system';
-// import { FFmpegKit, ReturnCode } from 'ffmpeg-kit-react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { STORAGE_KEYS } from '../constants';
+
+const API_ROOT = (process.env.EXPO_PUBLIC_API_URL || 'http://10.0.2.2:5000/api').replace(
+  /\/$/,
+  ''
+);
 
 const OUTPUT_DIR = `${FileSystem.documentDirectory}converted/`;
-
-export function isFfmpegAvailable() {
-  return Boolean(NativeModules.FFmpegKitReactNativeModule);
-}
-
-function stripFileScheme(uri) {
-  if (!uri) return uri;
-  return uri.startsWith('file://') ? uri.replace('file://', '') : uri;
-}
 
 function toDisplayPath(uri) {
   return uri.startsWith('file://') ? uri : `file://${uri}`;
@@ -28,147 +24,170 @@ async function ensureOutputDir() {
   }
 }
 
-async function stageInputFile(sourceUri, fileName) {
-  await ensureOutputDir();
-  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const destUri = `${FileSystem.cacheDirectory}opus_input_${Date.now()}_${safeName}`;
+async function getAuthHeaders() {
+  const token = await AsyncStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
 
-  await FileSystem.copyAsync({ from: sourceUri, to: destUri });
+function parseJsonResponse(body, fallbackMessage) {
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    throw new Error(fallbackMessage);
+  }
 
-  const destInfo = await FileSystem.getInfoAsync(destUri);
-  if (!destInfo.exists) {
-    throw new Error('Could not prepare input file for conversion.');
+  if (data?.success === false) {
+    throw new Error(data?.message || fallbackMessage);
+  }
+
+  return data;
+}
+
+function resolveDownloadUrl(url) {
+  if (/^https?:\/\//i.test(url)) return url;
+  const apiOrigin = API_ROOT.replace(/\/api\/?$/, '');
+  return url.startsWith('/') ? `${apiOrigin}${url}` : `${API_ROOT}/${url}`;
+}
+
+function throwHttpError(status, body, fallback) {
+  let message = `${fallback} (HTTP ${status})`;
+  try {
+    const data = JSON.parse(body);
+    if (data?.message) message = data.message;
+  } catch {
+    // keep default message
+  }
+  throw new Error(message);
+}
+
+async function downloadToOutput(downloadUrl, outputUri, onProgress) {
+  onProgress?.(60);
+
+  const headers = await getAuthHeaders();
+  delete headers['Content-Type'];
+
+  const result = await FileSystem.downloadAsync(resolveDownloadUrl(downloadUrl), outputUri, {
+    headers,
+  });
+
+  onProgress?.(95);
+
+  const outInfo = await FileSystem.getInfoAsync(result.uri);
+  if (!outInfo.exists) {
+    throw new Error('Converted file was not saved.');
   }
 
   return {
-    uri: destUri,
-    path: stripFileScheme(destUri),
+    uri: result.uri,
+    path: toDisplayPath(result.uri),
+    size: outInfo.size,
   };
 }
 
-async function runFfmpeg(args, onProgress) {
-  return new Promise((resolve, reject) => {
-    let lastProgress = 0;
-
-    FFmpegKit.executeWithArgumentsAsync(
-      args,
-      async (session) => {
-        try {
-          const returnCode = await session.getReturnCode();
-          if (ReturnCode.isSuccess(returnCode)) {
-            onProgress?.(100);
-            resolve(session);
-            return;
-          }
-
-          const logs = await session.getAllLogsAsString();
-          reject(new Error(logs?.trim() || `FFmpeg failed (code ${returnCode?.getValue?.() ?? 'unknown'})`));
-        } catch (err) {
-          reject(err);
-        }
-      },
-      undefined,
-      (statistics) => {
-        const time = statistics.getTime?.() ?? 0;
-        if (time <= 0) return;
-
-        const estimated = Math.min(95, Math.max(lastProgress + 1, Math.round(time / 1000) % 95));
-        if (estimated > lastProgress) {
-          lastProgress = estimated;
-          onProgress?.(estimated);
-        }
-      }
-    ).catch(reject);
-
-    onProgress?.(5);
-  });
-}
-
 /**
- * Opus → WAV (exact command semantics):
- * ffmpeg -c:a libopus -i input.opus -af aresample=async=1 -ar 48000 output.wav
+ * POST /api/audio/opus-to-wav → { success, wavPath: "/downloads/output.wav" }
  */
 export async function convertOpusToWav(sourceUri, fileName, onProgress) {
-  if (!isFfmpegAvailable()) {
-    throw new Error(
-      'FFmpeg native module not found. Build a development APK with: npx expo prebuild && npx expo run:android'
-    );
-  }
-
-  const input = await stageInputFile(sourceUri, fileName);
   await ensureOutputDir();
 
   const baseName = getBaseName(fileName);
   const outputUri = `${OUTPUT_DIR}${baseName}.wav`;
-  const outputPath = stripFileScheme(outputUri);
 
   const existing = await FileSystem.getInfoAsync(outputUri);
   if (existing.exists) {
     await FileSystem.deleteAsync(outputUri, { idempotent: true });
   }
 
-  onProgress?.(0);
+  onProgress?.(5);
 
-  await runFfmpeg(
-    ['-c:a', 'libopus', '-i', input.path, '-af', 'aresample=async=1', '-ar', '48000', outputPath],
-    onProgress
+  const authHeaders = await getAuthHeaders();
+  delete authHeaders['Content-Type'];
+
+  const upload = await FileSystem.uploadAsync(
+    `${API_ROOT}/audio/opus-to-wav`,
+    sourceUri,
+    {
+      httpMethod: 'POST',
+      uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+      fieldName: 'file',
+      mimeType: 'audio/opus',
+      parameters: { fileName },
+      headers: authHeaders,
+    }
   );
 
-  const outInfo = await FileSystem.getInfoAsync(outputUri);
-  if (!outInfo.exists) {
-    throw new Error('WAV file was not created.');
+  onProgress?.(40);
+
+  if (upload.status < 200 || upload.status >= 300) {
+    throwHttpError(upload.status, upload.body, 'WAV conversion failed');
   }
 
+  const payload = parseJsonResponse(upload.body, 'Invalid response from conversion server.');
+  const downloadUrl = payload.wavPath;
+  if (!downloadUrl) {
+    throw new Error('Server did not return wavPath for the WAV file.');
+  }
+
+  const saved = await downloadToOutput(downloadUrl, outputUri, onProgress);
+  onProgress?.(100);
+
   return {
-    uri: outputUri,
-    path: toDisplayPath(outputUri),
+    ...saved,
     fileName: `${baseName}.wav`,
-    size: outInfo.size,
+    wavPath: downloadUrl,
   };
 }
 
 /**
- * WAV → MP3 (exact command semantics):
- * ffmpeg -i output.wav -b:a 192k final.mp3
+ * POST /api/audio/wav-to-mp3 → { success, mp3Url: "/downloads/final.mp3" }
  */
-export async function convertWavToMp3(wavUri, opusFileName, onProgress) {
-  if (!isFfmpegAvailable()) {
-    throw new Error(
-      'FFmpeg native module not found. Build a development APK with: npx expo prebuild && npx expo run:android'
-    );
+export async function convertWavToMp3(wavOutput, opusFileName, onProgress) {
+  const wavPath = typeof wavOutput === 'string' ? wavOutput : wavOutput?.wavPath;
+
+  if (!wavPath) {
+    throw new Error('WAV path missing. Convert to WAV first.');
   }
 
   await ensureOutputDir();
 
-  const wavPath = stripFileScheme(wavUri);
   const baseName = getBaseName(opusFileName);
   const outputUri = `${OUTPUT_DIR}${baseName}.mp3`;
-  const outputPath = stripFileScheme(outputUri);
-
-  const wavInfo = await FileSystem.getInfoAsync(wavUri);
-  if (!wavInfo.exists) {
-    throw new Error('WAV file not found. Convert to WAV first.');
-  }
 
   const existing = await FileSystem.getInfoAsync(outputUri);
   if (existing.exists) {
     await FileSystem.deleteAsync(outputUri, { idempotent: true });
   }
 
-  onProgress?.(0);
+  onProgress?.(5);
 
-  await runFfmpeg(['-i', wavPath, '-b:a', '192k', outputPath], onProgress);
+  const response = await fetch(`${API_ROOT}/audio/wav-to-mp3`, {
+    method: 'POST',
+    headers: await getAuthHeaders(),
+    body: JSON.stringify({ wavPath }),
+  });
 
-  const outInfo = await FileSystem.getInfoAsync(outputUri);
-  if (!outInfo.exists) {
-    throw new Error('MP3 file was not created.');
+  const body = await response.text();
+  onProgress?.(40);
+
+  if (!response.ok) {
+    throwHttpError(response.status, body, 'MP3 conversion failed');
   }
 
+  const payload = parseJsonResponse(body, 'Invalid response from conversion server.');
+  const downloadUrl = payload.mp3Url;
+  if (!downloadUrl) {
+    throw new Error('Server did not return mp3Url for the MP3 file.');
+  }
+
+  const saved = await downloadToOutput(downloadUrl, outputUri, onProgress);
+  onProgress?.(100);
+
   return {
-    uri: outputUri,
-    path: toDisplayPath(outputUri),
+    ...saved,
     fileName: `${baseName}.mp3`,
-    size: outInfo.size,
   };
 }
 

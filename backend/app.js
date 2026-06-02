@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
 const requestLogger = require('./middleware/logger');
@@ -7,6 +8,7 @@ const errorHandler = require('./middleware/errorHandler');
 const routes = require('./routes');
 
 const app = express();
+const OUTPUTS_DIR = path.join(__dirname, 'outputs');
 
 // Security headers
 app.use(helmet());
@@ -25,6 +27,13 @@ const corsOptions = {
     ].filter(Boolean);
 
     if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // Android emulator (10.0.2.2) and local dev hosts
+    const emulatorPattern = /^https?:\/\/10\.0\.2\.2(:\d+)?$/;
+    const localhostPattern = /^https?:\/\/localhost(:\d+)?$/;
+    if (emulatorPattern.test(origin) || localhostPattern.test(origin)) {
       return callback(null, true);
     }
 
@@ -48,6 +57,9 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Global rate limiter
 app.use(limiter);
+
+// Converted audio files (WAV / MP3)
+app.use('/downloads', express.static(OUTPUTS_DIR));
 
 // Health check endpoint
 app.get('/health', (req, res) => {

@@ -1,4 +1,6 @@
 node_modules/
+uploads/
+outputs/
 .env
 *.log
 dist/

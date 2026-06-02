@@ -38,20 +38,7 @@
             "minSdkVersion": 24
           }
         }
-      ],
-      [
-        "@config-plugins/ffmpeg-kit-react-native",
-        {
-          "package": "audio",
-          "android": {
-            "package": "audio"
-          },
-          "ios": {
-            "package": "audio"
-          }
-        }
-      ],
-      "expo-build-properties"
+      ]
     ],
     "scheme": "fullstackapp",
     "experiments": {

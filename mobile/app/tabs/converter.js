@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,19 +7,21 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Platform,
+  Animated,
+  Modal,
+  TextInput,
+  Alert,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system';
 import Button from '../../components/Button';
 import Card from '../../components/Card';
 import ErrorMessage from '../../components/ErrorMessage';
 import Colors from '../../constants/colors';
-import {
-  convertOpusToWav,
-  convertWavToMp3,
-  isFfmpegAvailable,
-} from '../../services/audioConverterService';
+import { convertOpusToWav, convertWavToMp3 } from '../../services/audioConverterService';
 
 const STAGE = {
   IDLE: 'idle',
@@ -28,7 +30,6 @@ const STAGE = {
 };
 
 export default function ConverterScreen() {
-  const ffmpegReady = isFfmpegAvailable();
   const [selectedFile, setSelectedFile] = useState(null);
   const [wavOutput, setWavOutput] = useState(null);
   const [mp3Output, setMp3Output] = useState(null);
@@ -37,14 +38,164 @@ export default function ConverterScreen() {
   const [successMessage, setSuccessMessage] = useState('');
   const [error, setError] = useState('');
 
+  const [renameModalVisible, setRenameModalVisible] = useState(false);
+  const [renameKind, setRenameKind] = useState(null); // 'wav' | 'mp3' | null
+  const [renameInput, setRenameInput] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
+
   const isBusy = activeStage !== STAGE.IDLE;
   const hasFile = Boolean(selectedFile?.uri);
+
+  const progressAnim = useRef(new Animated.Value(0)).current; // scaleX (0..1)
+  useEffect(() => {
+    const p = Math.max(0, Math.min(1, progress / 100));
+    Animated.timing(progressAnim, {
+      toValue: p,
+      duration: 180,
+      useNativeDriver: true,
+    }).start();
+  }, [progress, progressAnim]);
 
   const resetOutputs = useCallback(() => {
     setWavOutput(null);
     setMp3Output(null);
     setSuccessMessage('');
   }, []);
+
+  const getOutputByKind = (kind) => {
+    if (kind === 'wav') return wavOutput;
+    if (kind === 'mp3') return mp3Output;
+    return null;
+  };
+
+  const shareOutputFile = async (kind) => {
+    const output = getOutputByKind(kind);
+    if (!output) return;
+    try {
+      // Lazy-load so this screen doesn't crash in runtimes
+      // that don't include the native ExpoSharing module.
+      const Sharing = await import('expo-sharing');
+      const isAvailable = await Sharing.isAvailableAsync?.();
+      if (!isAvailable) {
+        throw new Error(
+          'Sharing is not available in this build. Use a Dev Client / rebuild the native app to enable file sharing.'
+        );
+      }
+
+      await Sharing.shareAsync(output.uri);
+    } catch (err) {
+      setError(err?.message || 'Failed to share file.');
+    }
+  };
+
+  const openRenameModal = (kind) => {
+    const output = getOutputByKind(kind);
+    if (!output || isBusy) return;
+    setRenameKind(kind);
+    setRenameInput(output.fileName || '');
+    setRenameBusy(false);
+    setRenameModalVisible(true);
+    setError('');
+    setSuccessMessage('');
+  };
+
+  const closeRenameModal = () => {
+    setRenameModalVisible(false);
+    setRenameKind(null);
+    setRenameInput('');
+    setRenameBusy(false);
+  };
+
+  const renameOutputFile = async () => {
+    const kind = renameKind;
+    const output = getOutputByKind(kind);
+    if (!output) return closeRenameModal();
+
+    const raw = (renameInput || '').trim();
+    if (!raw) {
+      setError('Enter a new file name.');
+      return;
+    }
+
+    setRenameBusy(true);
+    setError('');
+    setSuccessMessage('');
+
+    try {
+      const currentFileName = output.fileName || 'audio';
+      const ext = currentFileName.includes('.')
+        ? currentFileName.slice(currentFileName.lastIndexOf('.'))
+        : '';
+
+      // Force the extension to stay consistent ('.wav' or '.mp3').
+      let nextFileName = raw;
+      if (ext) {
+        const base = nextFileName.replace(new RegExp(`${ext}$`, 'i'), '');
+        nextFileName = `${base}${ext}`;
+      }
+
+      nextFileName = nextFileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+      const dirUri = output.uri.substring(0, output.uri.lastIndexOf('/') + 1);
+      const destUri = `${dirUri}${nextFileName}`;
+
+      const existing = await FileSystem.getInfoAsync(destUri);
+      if (existing.exists) {
+        await FileSystem.deleteAsync(destUri, { idempotent: true });
+      }
+
+      await FileSystem.moveAsync({ from: output.uri, to: destUri });
+
+      const outInfo = await FileSystem.getInfoAsync(destUri);
+      if (!outInfo.exists) throw new Error('Renamed file not found after move.');
+
+      const updated = {
+        ...output,
+        uri: destUri,
+        path: destUri, // output.uri is already file://
+        fileName: nextFileName,
+        size: outInfo.size,
+      };
+
+      if (kind === 'wav') setWavOutput(updated);
+      if (kind === 'mp3') setMp3Output(updated);
+
+      setSuccessMessage(`Renamed to ${nextFileName}`);
+      closeRenameModal();
+    } catch (err) {
+      setError(err?.message || 'Rename failed.');
+    } finally {
+      setRenameBusy(false);
+    }
+  };
+
+  const deleteOutputFile = (kind) => {
+    const output = getOutputByKind(kind);
+    if (!output || isBusy) return;
+
+    Alert.alert(
+      'Delete file?',
+      `Delete ${output.fileName} from your device?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await FileSystem.deleteAsync(output.uri, { idempotent: true });
+              if (kind === 'wav') setWavOutput(null);
+              if (kind === 'mp3') setMp3Output(null);
+              setSuccessMessage(`Deleted ${output.fileName}`);
+            } catch (err) {
+              setError(err?.message || 'Delete failed.');
+            }
+          },
+        },
+      ],
+      { cancelable: true }
+    );
+  };
 
   const pickOpusFile = async () => {
     setError('');
@@ -140,7 +291,7 @@ export default function ConverterScreen() {
 
     try {
       const result = await convertWavToMp3(
-        wavOutput.uri,
+        wavOutput,
         selectedFile.name,
         setProgress
       );
@@ -174,27 +325,17 @@ export default function ConverterScreen() {
           </View>
           <View style={styles.headerText}>
             <Text style={styles.pageTitle}>Audio Converter</Text>
-            <Text style={styles.subtitle}>Opus → WAV → MP3 · offline on device</Text>
+            <Text style={styles.subtitle}>Opus → WAV → MP3 · converted on your backend</Text>
           </View>
         </View>
 
-        {!ffmpegReady ? (
-          <View style={styles.warningBanner}>
-            <Ionicons name="warning-outline" size={18} color={Colors.warning} />
-            <Text style={styles.warningBannerText}>
-              FFmpeg requires a native build (not Expo Go). Run prebuild, then install on device:
-              {'\n'}npx expo prebuild --platform android
-              {'\n'}npx expo run:android
-            </Text>
-          </View>
-        ) : (
-          <View style={styles.stepBanner}>
-            <Ionicons name="checkmark-circle-outline" size={18} color={Colors.success} />
-            <Text style={styles.stepBannerText}>
-              FFmpeg ready · offline conversion on device (libopus @ 48 kHz → MP3 192k)
-            </Text>
-          </View>
-        )}
+        <View style={styles.stepBanner}>
+          <Ionicons name="cloud-outline" size={18} color={Colors.info} />
+          <Text style={styles.stepBannerText}>
+            Audio is converted on the Node.js server (no FFmpeg in this app). Start the backend
+            and set EXPO_PUBLIC_API_URL in mobile/.env.
+          </Text>
+        </View>
 
         <ErrorMessage message={error} />
 
@@ -238,7 +379,7 @@ export default function ConverterScreen() {
             >
               <Ionicons name="folder-open-outline" size={32} color={Colors.primary} />
               <Text style={styles.pickTitle}>Tap to pick .opus file</Text>
-              <Text style={styles.pickHint}>Works fully offline on your phone</Text>
+              <Text style={styles.pickHint}>Requires network access to your API server</Text>
             </TouchableOpacity>
           )}
 
@@ -255,16 +396,27 @@ export default function ConverterScreen() {
         </Card>
 
         {isBusy ? (
-          <Card style={styles.progressCard}>
-            <View style={styles.progressHeader}>
-              <ActivityIndicator size="small" color={Colors.primary} />
-              <Text style={styles.progressLabel}>{convertingLabel}</Text>
-            </View>
-            <View style={styles.progressTrack}>
-              <View style={[styles.progressFill, { width: `${progress}%` }]} />
-            </View>
-            <Text style={styles.progressPercent}>{progress}%</Text>
-          </Card>
+          <FadeIn>{/*
+            Small animation to make conversion feel responsive.
+          */}
+            <Card style={styles.progressCard}>
+              <View style={styles.progressHeader}>
+                <ActivityIndicator size="small" color={Colors.primary} />
+                <Text style={styles.progressLabel}>{convertingLabel}</Text>
+              </View>
+              <View style={styles.progressTrack}>
+                <Animated.View
+                  style={[
+                    styles.progressFill,
+                    {
+                      transform: [{ scaleX: progressAnim }],
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={styles.progressPercent}>{progress}%</Text>
+            </Card>
+          </FadeIn>
         ) : null}
 
         <Card style={styles.section}>
@@ -293,41 +445,116 @@ export default function ConverterScreen() {
         </Card>
 
         {(wavOutput || mp3Output) ? (
-          <Card style={styles.section} elevated>
-            <Text style={styles.sectionTitle}>Saved files</Text>
-            <Text style={styles.sectionHint}>Open from your device file manager or import into KineMaster</Text>
+          <FadeIn>
+            <Card style={styles.section} elevated>
+              <Text style={styles.sectionTitle}>Saved files</Text>
+              <Text style={styles.sectionHint}>
+                Open from your device file manager or import into KineMaster
+              </Text>
 
-            {wavOutput ? (
-              <OutputRow
-                icon="waveform"
-                label="WAV (KineMaster)"
-                path={wavOutput.path}
-                color={Colors.info}
-              />
-            ) : null}
-            {mp3Output ? (
-              <OutputRow
-                icon="share-social-outline"
-                label="MP3 (share)"
-                path={mp3Output.path}
-                color={Colors.success}
-                last
-              />
-            ) : null}
-          </Card>
+              {wavOutput ? (
+                <OutputRow
+                  icon="waveform"
+                  label="WAV (KineMaster)"
+                  path={wavOutput.path}
+                  color={Colors.info}
+                  last={!mp3Output}
+                  onShare={() => shareOutputFile('wav')}
+                  onRename={() => openRenameModal('wav')}
+                  onDelete={() => deleteOutputFile('wav')}
+                  actionsDisabled={isBusy}
+                />
+              ) : null}
+
+              {mp3Output ? (
+                <OutputRow
+                  icon="musical-notes"
+                  label="MP3"
+                  path={mp3Output.path}
+                  color={Colors.success}
+                  last
+                  onShare={() => shareOutputFile('mp3')}
+                  onRename={() => openRenameModal('mp3')}
+                  onDelete={() => deleteOutputFile('mp3')}
+                  actionsDisabled={isBusy}
+                />
+              ) : null}
+            </Card>
+          </FadeIn>
         ) : null}
 
         <Card style={styles.pipelineCard}>
           <Text style={styles.pipelineTitle}>Pipeline</Text>
-          <PipelineStep step="1" label="Opus → WAV" detail="libopus + aresample=async=1 @ 48 kHz" done={Boolean(wavOutput)} />
+          <PipelineStep step="1" label="Opus → WAV" detail="Server-side FFmpeg (48 kHz)" done={Boolean(wavOutput)} />
           <PipelineStep step="2" label="WAV → MP3" detail="192 kbps" done={Boolean(mp3Output)} last />
         </Card>
       </ScrollView>
+
+      <Modal
+        visible={renameModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeRenameModal}
+      >
+        <View style={styles.modalOverlay}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.modalKeyboard}
+          >
+            <View style={styles.modalCard}>
+              <Text style={styles.modalTitle}>Rename file</Text>
+              <Text style={styles.modalHint}>
+                Enter a new name. Extension will stay {renameKind === 'wav' ? '.wav' : '.mp3'}.
+              </Text>
+
+              <TextInput
+                value={renameInput}
+                onChangeText={setRenameInput}
+                style={styles.modalInput}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!renameBusy}
+              />
+
+              <View style={styles.modalActions}>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    title="Cancel"
+                    variant="outline"
+                    size="sm"
+                    onPress={closeRenameModal}
+                    disabled={renameBusy}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    title={renameBusy ? 'Saving...' : 'Save'}
+                    size="sm"
+                    onPress={renameOutputFile}
+                    loading={renameBusy}
+                    disabled={renameBusy}
+                  />
+                </View>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
 
-function OutputRow({ icon, label, path, color, last }) {
+function OutputRow({
+  icon,
+  label,
+  path,
+  color,
+  last,
+  onShare,
+  onRename,
+  onDelete,
+  actionsDisabled,
+}) {
   return (
     <View style={[styles.outputRow, !last && styles.outputRowBorder]}>
       <View style={styles.outputHeader}>
@@ -337,6 +564,35 @@ function OutputRow({ icon, label, path, color, last }) {
       <Text style={styles.outputPath} selectable>
         {path}
       </Text>
+
+      <View style={styles.outputActions}>
+        <TouchableOpacity
+          onPress={onShare}
+          disabled={actionsDisabled}
+          style={styles.iconBtn}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <Ionicons name="share-social-outline" size={18} color={color} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={onRename}
+          disabled={actionsDisabled}
+          style={styles.iconBtn}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <Ionicons name="create-outline" size={18} color={color} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={onDelete}
+          disabled={actionsDisabled}
+          style={styles.iconBtn}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <Ionicons name="trash-outline" size={18} color={Colors.error} />
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
@@ -358,6 +614,30 @@ function PipelineStep({ step, label, detail, done, last }) {
       )}
     </View>
   );
+}
+
+function FadeIn({ children }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(8)).current;
+
+  useEffect(() => {
+    opacity.setValue(0);
+    translateY.setValue(8);
+    Animated.parallel([
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 220,
+        useNativeDriver: true,
+      }),
+      Animated.timing(translateY, {
+        toValue: 0,
+        duration: 220,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, translateY]);
+
+  return <Animated.View style={{ opacity, transform: [{ translateY }] }}>{children}</Animated.View>;
 }
 
 const styles = StyleSheet.create({
@@ -540,6 +820,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   progressFill: {
+    width: '100%',
     height: '100%',
     backgroundColor: Colors.primary,
     borderRadius: 4,
@@ -579,6 +860,17 @@ const styles = StyleSheet.create({
     color: Colors.text,
     lineHeight: 18,
     fontFamily: 'monospace',
+  },
+  outputActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    marginTop: 6,
+  },
+  iconBtn: {
+    padding: 2,
+    borderRadius: 10,
+    backgroundColor: Colors.surfaceElevated,
   },
   pipelineCard: {
     marginTop: 4,
@@ -626,5 +918,47 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: Colors.textMuted,
     marginTop: 2,
+  },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 18,
+  },
+  modalKeyboard: { width: '100%' },
+  modalCard: {
+    width: '100%',
+    backgroundColor: Colors.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: 16,
+    gap: 10,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: Colors.text,
+  },
+  modalHint: {
+    fontSize: 12,
+    color: Colors.textMuted,
+    lineHeight: 17,
+  },
+  modalInput: {
+    borderWidth: 1.5,
+    borderColor: Colors.primary + '55',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: Colors.text,
+    backgroundColor: Colors.surfaceElevated,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 6,
   },
 });

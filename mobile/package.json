@@ -23,6 +23,7 @@
     "expo-font": "~12.0.7",
     "expo-linking": "~6.3.1",
     "expo-router": "~3.5.14",
+    "expo-sharing": "~12.0.1",
     "expo-splash-screen": "~0.27.5",
     "expo-status-bar": "~1.12.1",
     "fullstack-app": "file:..",
@@ -32,7 +33,6 @@
     "react-native-screens": "3.31.1"
   },
   "devDependencies": {
-    "@babel/core": "^7.24.5",
-    "@config-plugins/ffmpeg-kit-react-native": "^8.0.0"
+    "@babel/core": "^7.24.5"
   }
 }
