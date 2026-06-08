@@ -61,6 +61,25 @@ app.use(limiter);
 // Converted audio files (WAV / MP3)
 app.use('/downloads', express.static(OUTPUTS_DIR));
 
+// Root — browsers and Render hit / on deploy
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'API is running',
+    health: '/health',
+    api: '/api',
+    downloads: '/downloads',
+  });
+});
+
+app.head('/', (req, res) => {
+  res.status(200).end();
+});
+
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end();
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({
