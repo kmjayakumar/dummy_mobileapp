@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 const app = require('./app');
 const connectDB = require('./config/db');
 const { runAudioFileCleanup, getRetentionMs } = require('./utils/fileCleanup');
@@ -19,10 +20,21 @@ function ensureDir(dirPath) {
   }
 }
 
+function logFfmpegVersion() {
+  try {
+    const line = execSync('ffmpeg -version', { encoding: 'utf8' }).split('\n')[0];
+    console.log(`[server] ${line}`);
+  } catch {
+    console.error('[server] WARNING: ffmpeg not found — audio conversion will fail');
+  }
+}
+
 const startServer = async () => {
   try {
     ensureDir(path.join(BACKEND_ROOT, 'uploads'));
     ensureDir(path.join(BACKEND_ROOT, 'outputs'));
+
+    logFfmpegVersion();
 
     runAudioFileCleanup();
     cleanupTimer = setInterval(runAudioFileCleanup, CLEANUP_INTERVAL_MS);
