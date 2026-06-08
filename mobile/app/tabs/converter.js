@@ -21,13 +21,19 @@ import Button from '../../components/Button';
 import Card from '../../components/Card';
 import ErrorMessage from '../../components/ErrorMessage';
 import Colors from '../../constants/colors';
-import { convertOpusToWav, convertWavToMp3 } from '../../services/audioConverterService';
+import { convertOpusToWav, convertWavToMp3, getConverterOutputDir } from '../../services/audioConverterService';
 
 const STAGE = {
   IDLE: 'idle',
   WAV: 'wav',
   MP3: 'mp3',
 };
+
+const PHONE_OUTPUT_DIR = getConverterOutputDir();
+
+function displayPhonePath(uri) {
+  return (uri || '').replace(/^file:\/\//, '');
+}
 
 export default function ConverterScreen() {
   const [selectedFile, setSelectedFile] = useState(null);
@@ -346,12 +352,27 @@ export default function ConverterScreen() {
         </View>
 
         <View style={styles.stepBanner}>
-          <Ionicons name="cloud-outline" size={18} color={Colors.info} />
+          <Ionicons name="phone-portrait-outline" size={18} color={Colors.info} />
           <Text style={styles.stepBannerText}>
-            Audio is converted on the Node.js server (no FFmpeg in this app). Start the backend
-            and set EXPO_PUBLIC_API_URL in mobile/.env.
+            Server converts the file; your phone keeps the final copy in the folder below.
           </Text>
         </View>
+
+        <Card style={styles.storageCard}>
+          <View style={styles.storageHeader}>
+            <Ionicons name="folder-open" size={18} color={Colors.primary} />
+            <Text style={styles.storageTitle}>Saved on this phone</Text>
+          </View>
+          <Text style={styles.storageHint}>
+            WAV and MP3 files are stored in your app private folder (use Share to send elsewhere).
+          </Text>
+          <View style={styles.storagePathBox}>
+            <Text style={styles.storagePathLabel}>Folder path</Text>
+            <Text style={styles.storagePathValue} selectable>
+              {displayPhonePath(PHONE_OUTPUT_DIR)}
+            </Text>
+          </View>
+        </Card>
 
         <ErrorMessage message={error} />
 
@@ -465,14 +486,15 @@ export default function ConverterScreen() {
             <Card style={styles.section} elevated>
               <Text style={styles.sectionTitle}>Saved files</Text>
               <Text style={styles.sectionHint}>
-                Open from your device file manager or import into KineMaster
+                Full paths on this device — use Share to export to Drive, WhatsApp, etc.
               </Text>
 
               {wavOutput ? (
                 <OutputRow
                   icon="waveform"
                   label="WAV (KineMaster)"
-                  path={wavOutput.path}
+                  fileName={wavOutput.fileName}
+                  path={displayPhonePath(wavOutput.uri)}
                   color={Colors.info}
                   last={!mp3Output}
                   onShare={() => shareOutputFile('wav')}
@@ -486,7 +508,8 @@ export default function ConverterScreen() {
                 <OutputRow
                   icon="musical-notes"
                   label="MP3"
-                  path={mp3Output.path}
+                  fileName={mp3Output.fileName}
+                  path={displayPhonePath(mp3Output.uri)}
                   color={Colors.success}
                   last
                   onShare={() => shareOutputFile('mp3')}
@@ -563,6 +586,7 @@ export default function ConverterScreen() {
 function OutputRow({
   icon,
   label,
+  fileName,
   path,
   color,
   last,
@@ -577,6 +601,12 @@ function OutputRow({
         <Ionicons name={icon} size={16} color={color} />
         <Text style={styles.outputLabel}>{label}</Text>
       </View>
+      {fileName ? (
+        <Text style={styles.outputFileName} selectable>
+          {fileName}
+        </Text>
+      ) : null}
+      <Text style={styles.outputPathLabel}>Full path on phone</Text>
       <Text style={styles.outputPath} selectable>
         {path}
       </Text>
@@ -708,8 +738,52 @@ const styles = StyleSheet.create({
   stepBannerText: {
     flex: 1,
     fontSize: 13,
-    color: Colors.success,
+    color: Colors.info,
     lineHeight: 19,
+  },
+  storageCard: {
+    marginBottom: 16,
+    gap: 8,
+    backgroundColor: Colors.primary + '0D',
+    borderWidth: 1,
+    borderColor: Colors.primary + '33',
+  },
+  storageHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  storageTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: Colors.text,
+  },
+  storageHint: {
+    fontSize: 12,
+    color: Colors.textMuted,
+    lineHeight: 17,
+  },
+  storagePathBox: {
+    marginTop: 4,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: Colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    gap: 4,
+  },
+  storagePathLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: Colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  storagePathValue: {
+    fontSize: 12,
+    color: Colors.text,
+    lineHeight: 18,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   warningBanner: {
     flexDirection: 'row',
@@ -870,6 +944,20 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: Colors.textSecondary,
+  },
+  outputFileName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: Colors.text,
+    marginTop: 2,
+  },
+  outputPathLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: Colors.textMuted,
+    marginTop: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
   },
   outputPath: {
     fontSize: 12,

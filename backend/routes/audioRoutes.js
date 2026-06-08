@@ -4,10 +4,13 @@ const fs = require('fs');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const multer = require('multer');
+const { protect } = require('../middleware/auth');
 
 const execAsync = promisify(exec);
 
 const router = express.Router();
+
+router.use(protect);
 
 const BACKEND_ROOT = path.join(__dirname, '..');
 const UPLOADS_DIR = path.join(BACKEND_ROOT, 'uploads');
