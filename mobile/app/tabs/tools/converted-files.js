@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -25,7 +25,7 @@ import {
   fileExists,
 } from '../../../services/conversionHistoryService';
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
+// ─── pure helpers (module-level, never recreated) ─────────────────────────────
 
 function formatSize(bytes) {
   if (!bytes) return '—';
@@ -43,69 +43,138 @@ function formatDate(iso) {
   });
 }
 
-function formatBadge(format) {
-  return (format || '').toUpperCase();
-}
-
 const FORMAT_COLOR = {
   wav: Colors.info,
   mp3: Colors.success,
 };
 
-// ─── component ────────────────────────────────────────────────────────────────
+// ─── memoized sub-components ──────────────────────────────────────────────────
+
+const ActionBtn = React.memo(function ActionBtn({ icon, label, color, onPress, disabled }) {
+  return (
+    <TouchableOpacity
+      style={[styles.actionBtn, disabled && styles.actionBtnDisabled]}
+      onPress={onPress}
+      disabled={disabled}
+      activeOpacity={0.65}
+      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+    >
+      <Ionicons name={icon} size={16} color={disabled ? Colors.textMuted : color} />
+      <Text style={[styles.actionLabel, { color: disabled ? Colors.textMuted : color }]}>
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+});
+
+const FileItem = React.memo(function FileItem({
+  item,
+  isMissing,
+  isLast,
+  onOpen,
+  onShare,
+  onRename,
+  onDelete,
+  onRemoveBroken,
+}) {
+  const accentColor = FORMAT_COLOR[item.format] || Colors.primary;
+
+  return (
+    <View style={[styles.item, !isLast && styles.itemBorder]}>
+      <View style={[styles.itemAccent, { backgroundColor: accentColor }]} />
+      <View style={styles.itemBody}>
+        <View style={styles.itemRow}>
+          <Text style={styles.fileName} numberOfLines={1}>
+            {item.fileName}
+          </Text>
+          <View style={[styles.formatBadge, { borderColor: accentColor + '60' }]}>
+            <Text style={[styles.formatText, { color: accentColor }]}>
+              {(item.format || '').toUpperCase()}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.metaRow}>
+          <Text style={styles.metaText}>{formatSize(item.size)}</Text>
+          <Text style={styles.metaDot}>·</Text>
+          <Text style={styles.metaText}>{formatDate(item.createdAt)}</Text>
+        </View>
+
+        {isMissing ? (
+          <TouchableOpacity
+            style={styles.missingBanner}
+            onPress={onRemoveBroken}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="warning-outline" size={13} color={Colors.warning} />
+            <Text style={styles.missingText}>File missing — tap to remove</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        <View style={styles.actions}>
+          <ActionBtn icon="open-outline"        label="Open"   color={Colors.textSecondary} onPress={onOpen}         disabled={isMissing} />
+          <ActionBtn icon="share-social-outline" label="Share"  color={Colors.textSecondary} onPress={onShare}        disabled={isMissing} />
+          <ActionBtn icon="create-outline"       label="Rename" color={Colors.primary}       onPress={onRename}       disabled={isMissing} />
+          <ActionBtn icon="trash-outline"        label="Delete" color={Colors.error}         onPress={onDelete} />
+        </View>
+      </View>
+    </View>
+  );
+});
+
+// ─── screen ───────────────────────────────────────────────────────────────────
 
 export default function ConvertedFilesScreen() {
-  const [entries, setEntries] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
+  const [entries, setEntries]       = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [search, setSearch]         = useState('');
   const [missingIds, setMissingIds] = useState(new Set());
 
-  // Rename modal state
+  // Rename modal
   const [renameVisible, setRenameVisible] = useState(false);
-  const [renameTarget, setRenameTarget] = useState(null); // entry
-  const [renameInput, setRenameInput] = useState('');
-  const [renameBusy, setRenameBusy] = useState(false);
-  const [renameError, setRenameError] = useState('');
+  const [renameTarget, setRenameTarget]   = useState(null);
+  const [renameInput, setRenameInput]     = useState('');
+  const [renameBusy, setRenameBusy]       = useState(false);
+  const [renameError, setRenameError]     = useState('');
 
-  // Reload list every time this screen comes into focus (e.g. after a conversion).
-  useFocusEffect(
-    useCallback(() => {
-      loadHistory();
-    }, [])
-  );
+  // ── data loading ────────────────────────────────────────────────────────────
 
-  async function loadHistory() {
-    setLoading(true);
-    try {
-      const data = await getHistory();
-      setEntries(data);
-
-      // Check which files are missing without blocking the render.
-      checkMissing(data);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function checkMissing(data) {
+  const checkMissing = useCallback(async (data) => {
     const results = await Promise.all(
       data.map(async (e) => ({ id: e.id, exists: await fileExists(e.fileUri) }))
     );
     const missing = new Set(results.filter((r) => !r.exists).map((r) => r.id));
     setMissingIds(missing);
-  }
+  }, []);
 
-  // ── search filter ──────────────────────────────────────────────────────────
+  const loadHistory = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await getHistory();
+      setEntries(data);
+      // File-existence check runs after render — does not block the list appearing.
+      checkMissing(data);
+    } finally {
+      setLoading(false);
+    }
+  }, [checkMissing]);
 
-  const filtered = search.trim()
-    ? entries.filter((e) =>
-        e.fileName.toLowerCase().includes(search.trim().toLowerCase())
-      )
-    : entries;
+  // Reload on focus only (not on every render).
+  useFocusEffect(loadHistory);
 
-  // ── actions ───────────────────────────────────────────────────────────────
+  // ── derived data (memoized — only recalculates when entries or search changes)
 
-  const handleShare = async (entry) => {
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return entries;
+    return entries.filter((e) => e.fileName.toLowerCase().includes(term));
+  }, [entries, search]);
+
+  // ── stable action handlers ───────────────────────────────────────────────────
+  // Each handler is stable (useCallback with no per-item deps).
+  // Per-item calls are wired via closures inside renderItem / FileItem.
+
+  const handleShare = useCallback(async (entry) => {
     try {
       const Sharing = await import('expo-sharing');
       const available = await Sharing.isAvailableAsync?.();
@@ -117,15 +186,11 @@ export default function ConvertedFilesScreen() {
     } catch (err) {
       Alert.alert('Share failed', err?.message || 'Could not share file.');
     }
-  };
+  }, []);
 
-  const handleOpen = async (entry) => {
-    // On mobile, "open" is the same as "share" — hand off to the OS.
-    await handleShare(entry);
-  };
+  const handleOpen = useCallback((entry) => handleShare(entry), [handleShare]);
 
-  const openRenameModal = (entry) => {
-    // Strip extension from the display value so the user edits the base name.
+  const openRenameModal = useCallback((entry) => {
     const ext = entry.fileName.includes('.')
       ? entry.fileName.slice(entry.fileName.lastIndexOf('.'))
       : '';
@@ -135,17 +200,17 @@ export default function ConvertedFilesScreen() {
     setRenameError('');
     setRenameBusy(false);
     setRenameVisible(true);
-  };
+  }, []);
 
-  const closeRenameModal = () => {
+  const closeRenameModal = useCallback(() => {
     setRenameVisible(false);
     setRenameTarget(null);
     setRenameInput('');
     setRenameError('');
     setRenameBusy(false);
-  };
+  }, []);
 
-  const confirmRename = async () => {
+  const confirmRename = useCallback(async () => {
     if (!renameInput.trim()) {
       setRenameError('Name cannot be empty.');
       return;
@@ -154,18 +219,16 @@ export default function ConvertedFilesScreen() {
     setRenameError('');
     try {
       const updated = await renameEntry(renameTarget.id, renameInput.trim());
-      setEntries((prev) =>
-        prev.map((e) => (e.id === updated.id ? updated : e))
-      );
+      setEntries((prev) => prev.map((e) => (e.id === updated.id ? updated : e)));
       closeRenameModal();
     } catch (err) {
       setRenameError(err?.message || 'Rename failed.');
     } finally {
       setRenameBusy(false);
     }
-  };
+  }, [renameInput, renameTarget, closeRenameModal]);
 
-  const handleDelete = (entry) => {
+  const handleDelete = useCallback((entry) => {
     Alert.alert(
       'Delete file?',
       `"${entry.fileName}" will be removed from your device and history.`,
@@ -191,9 +254,9 @@ export default function ConvertedFilesScreen() {
       ],
       { cancelable: true }
     );
-  };
+  }, []);
 
-  const handleRemoveBroken = (entry) => {
+  const handleRemoveBroken = useCallback((entry) => {
     Alert.alert(
       'Remove from history?',
       `"${entry.fileName}" is missing from disk. Remove this record?`,
@@ -215,82 +278,39 @@ export default function ConvertedFilesScreen() {
       ],
       { cancelable: true }
     );
-  };
+  }, []);
 
-  // ── render ────────────────────────────────────────────────────────────────
+  const handleClearSearch = useCallback(() => setSearch(''), []);
 
-  const renderItem = ({ item, index }) => {
+  const handleRenameInput = useCallback((v) => {
+    setRenameInput(v);
+    setRenameError('');
+  }, []);
+
+  // ── FlatList helpers ─────────────────────────────────────────────────────────
+
+  const keyExtractor = useCallback((item) => item.id, []);
+
+  // renderItem is stable — closures capture the stable action handlers above.
+  // FileItem is React.memo so it only re-renders when its own props change.
+  const renderItem = useCallback(({ item, index }) => {
     const isMissing = missingIds.has(item.id);
-    const accentColor = FORMAT_COLOR[item.format] || Colors.primary;
     const isLast = index === filtered.length - 1;
-
     return (
-      <View style={[styles.item, !isLast && styles.itemBorder]}>
-        {/* Left accent + info */}
-        <View style={[styles.itemAccent, { backgroundColor: accentColor }]} />
-        <View style={styles.itemBody}>
-          <View style={styles.itemRow}>
-            <Text style={styles.fileName} numberOfLines={1}>
-              {item.fileName}
-            </Text>
-            <View style={[styles.formatBadge, { borderColor: accentColor + '60' }]}>
-              <Text style={[styles.formatText, { color: accentColor }]}>
-                {formatBadge(item.format)}
-              </Text>
-            </View>
-          </View>
-
-          <View style={styles.metaRow}>
-            <Text style={styles.metaText}>{formatSize(item.size)}</Text>
-            <Text style={styles.metaDot}>·</Text>
-            <Text style={styles.metaText}>{formatDate(item.createdAt)}</Text>
-          </View>
-
-          {isMissing ? (
-            <TouchableOpacity
-              style={styles.missingBanner}
-              onPress={() => handleRemoveBroken(item)}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="warning-outline" size={13} color={Colors.warning} />
-              <Text style={styles.missingText}>File missing — tap to remove</Text>
-            </TouchableOpacity>
-          ) : null}
-
-          {/* Action row */}
-          <View style={styles.actions}>
-            <ActionBtn
-              icon="open-outline"
-              label="Open"
-              color={Colors.textSecondary}
-              onPress={() => handleOpen(item)}
-              disabled={isMissing}
-            />
-            <ActionBtn
-              icon="share-social-outline"
-              label="Share"
-              color={Colors.textSecondary}
-              onPress={() => handleShare(item)}
-              disabled={isMissing}
-            />
-            <ActionBtn
-              icon="create-outline"
-              label="Rename"
-              color={Colors.primary}
-              onPress={() => openRenameModal(item)}
-              disabled={isMissing}
-            />
-            <ActionBtn
-              icon="trash-outline"
-              label="Delete"
-              color={Colors.error}
-              onPress={() => handleDelete(item)}
-            />
-          </View>
-        </View>
-      </View>
+      <FileItem
+        item={item}
+        isMissing={isMissing}
+        isLast={isLast}
+        onOpen={() => handleOpen(item)}
+        onShare={() => handleShare(item)}
+        onRename={() => openRenameModal(item)}
+        onDelete={() => handleDelete(item)}
+        onRemoveBroken={() => handleRemoveBroken(item)}
+      />
     );
-  };
+  }, [missingIds, filtered.length, handleOpen, handleShare, openRenameModal, handleDelete, handleRemoveBroken]);
+
+  // ── render ───────────────────────────────────────────────────────────────────
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['bottom']}>
@@ -308,7 +328,7 @@ export default function ConvertedFilesScreen() {
           clearButtonMode="while-editing"
         />
         {search.length > 0 && Platform.OS !== 'ios' ? (
-          <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <TouchableOpacity onPress={handleClearSearch} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <Ionicons name="close-circle" size={17} color={Colors.textMuted} />
           </TouchableOpacity>
         ) : null}
@@ -334,11 +354,15 @@ export default function ConvertedFilesScreen() {
       ) : (
         <FlatList
           data={filtered}
-          keyExtractor={(item) => item.id}
+          keyExtractor={keyExtractor}
           renderItem={renderItem}
           contentContainerStyle={styles.list}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
+          removeClippedSubviews
+          initialNumToRender={10}
+          maxToRenderPerBatch={10}
+          windowSize={5}
         />
       )}
 
@@ -358,42 +382,26 @@ export default function ConvertedFilesScreen() {
               <Text style={styles.modalTitle}>Rename file</Text>
               <Text style={styles.modalHint}>
                 Enter a new base name.{' '}
-                {renameTarget
-                  ? `Extension (.${renameTarget.format}) will be kept.`
-                  : ''}
+                {renameTarget ? `Extension (.${renameTarget.format}) will be kept.` : ''}
               </Text>
 
               <TextInput
                 style={[styles.modalInput, renameError ? styles.modalInputError : null]}
                 value={renameInput}
-                onChangeText={(v) => { setRenameInput(v); setRenameError(''); }}
+                onChangeText={handleRenameInput}
                 autoCapitalize="none"
                 autoCorrect={false}
                 editable={!renameBusy}
                 selectTextOnFocus
               />
-              {renameError ? (
-                <Text style={styles.renameError}>{renameError}</Text>
-              ) : null}
+              {renameError ? <Text style={styles.renameError}>{renameError}</Text> : null}
 
               <View style={styles.modalActions}>
                 <View style={{ flex: 1 }}>
-                  <Button
-                    title="Cancel"
-                    variant="outline"
-                    size="sm"
-                    onPress={closeRenameModal}
-                    disabled={renameBusy}
-                  />
+                  <Button title="Cancel" variant="outline" size="sm" onPress={closeRenameModal} disabled={renameBusy} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button
-                    title={renameBusy ? 'Saving…' : 'Save'}
-                    size="sm"
-                    onPress={confirmRename}
-                    loading={renameBusy}
-                    disabled={renameBusy}
-                  />
+                  <Button title={renameBusy ? 'Saving…' : 'Save'} size="sm" onPress={confirmRename} loading={renameBusy} disabled={renameBusy} />
                 </View>
               </View>
             </View>
@@ -404,34 +412,11 @@ export default function ConvertedFilesScreen() {
   );
 }
 
-// ─── small sub-component ──────────────────────────────────────────────────────
-
-function ActionBtn({ icon, label, color, onPress, disabled }) {
-  return (
-    <TouchableOpacity
-      style={[styles.actionBtn, disabled && styles.actionBtnDisabled]}
-      onPress={onPress}
-      disabled={disabled}
-      activeOpacity={0.65}
-      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-    >
-      <Ionicons name={icon} size={16} color={disabled ? Colors.textMuted : color} />
-      <Text style={[styles.actionLabel, { color: disabled ? Colors.textMuted : color }]}>
-        {label}
-      </Text>
-    </TouchableOpacity>
-  );
-}
-
 // ─── styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
+  safeArea: { flex: 1, backgroundColor: Colors.background },
 
-  // Search
   searchWrap: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -443,14 +428,8 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   searchIcon: { flexShrink: 0 },
-  searchInput: {
-    flex: 1,
-    fontSize: 15,
-    color: Colors.text,
-    paddingVertical: 2,
-  },
+  searchInput: { flex: 1, fontSize: 15, color: Colors.text, paddingVertical: 2 },
 
-  // States
   centered: {
     flex: 1,
     alignItems: 'center',
@@ -471,41 +450,13 @@ const styles = StyleSheet.create({
     lineHeight: 19,
   },
 
-  // List
-  list: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-  },
-  item: {
-    flexDirection: 'row',
-    paddingVertical: 14,
-    gap: 12,
-  },
-  itemBorder: {
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-  },
-  itemAccent: {
-    width: 3,
-    borderRadius: 2,
-    flexShrink: 0,
-    alignSelf: 'stretch',
-  },
-  itemBody: {
-    flex: 1,
-    gap: 4,
-  },
-  itemRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  fileName: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: '600',
-    color: Colors.text,
-  },
+  list: { paddingVertical: 8, paddingHorizontal: 16 },
+  item: { flexDirection: 'row', paddingVertical: 14, gap: 12 },
+  itemBorder: { borderBottomWidth: 1, borderBottomColor: Colors.border },
+  itemAccent: { width: 3, borderRadius: 2, flexShrink: 0, alignSelf: 'stretch' },
+  itemBody: { flex: 1, gap: 4 },
+  itemRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  fileName: { flex: 1, fontSize: 14, fontWeight: '600', color: Colors.text },
   formatBadge: {
     paddingHorizontal: 6,
     paddingVertical: 2,
@@ -513,53 +464,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     flexShrink: 0,
   },
-  formatText: {
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-  },
-  metaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  metaText: {
-    fontSize: 12,
-    color: Colors.textMuted,
-  },
-  metaDot: {
-    fontSize: 12,
-    color: Colors.border,
-  },
-  missingBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    marginTop: 2,
-  },
-  missingText: {
-    fontSize: 12,
-    color: Colors.warning,
-  },
-  actions: {
-    flexDirection: 'row',
-    gap: 16,
-    marginTop: 8,
-  },
-  actionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  actionBtnDisabled: {
-    opacity: 0.4,
-  },
-  actionLabel: {
-    fontSize: 12,
-    fontWeight: '500',
-  },
+  formatText: { fontSize: 10, fontWeight: '700', letterSpacing: 0.5 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  metaText: { fontSize: 12, color: Colors.textMuted },
+  metaDot: { fontSize: 12, color: Colors.border },
+  missingBanner: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
+  missingText: { fontSize: 12, color: Colors.warning },
+  actions: { flexDirection: 'row', gap: 16, marginTop: 8 },
+  actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  actionBtnDisabled: { opacity: 0.4 },
+  actionLabel: { fontSize: 12, fontWeight: '500' },
 
-  // Rename modal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -576,16 +491,8 @@ const styles = StyleSheet.create({
     padding: 20,
     gap: 10,
   },
-  modalTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  modalHint: {
-    fontSize: 13,
-    color: Colors.textMuted,
-    lineHeight: 18,
-  },
+  modalTitle: { fontSize: 16, fontWeight: '700', color: Colors.text },
+  modalHint: { fontSize: 13, color: Colors.textMuted, lineHeight: 18 },
   modalInput: {
     borderWidth: 1.5,
     borderColor: Colors.primary + '55',
@@ -596,17 +503,7 @@ const styles = StyleSheet.create({
     color: Colors.text,
     backgroundColor: Colors.surfaceElevated,
   },
-  modalInputError: {
-    borderColor: Colors.error,
-  },
-  renameError: {
-    fontSize: 12,
-    color: Colors.error,
-    marginTop: -4,
-  },
-  modalActions: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 4,
-  },
+  modalInputError: { borderColor: Colors.error },
+  renameError: { fontSize: 12, color: Colors.error, marginTop: -4 },
+  modalActions: { flexDirection: 'row', gap: 10, marginTop: 4 },
 });

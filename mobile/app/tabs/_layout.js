@@ -13,24 +13,34 @@ export default function TabsLayout() {
     return <Redirect href="/auth/login" />;
   }
 
+  // Tab bar height accounts for the home indicator / gesture nav bar on Android.
+  // The screenOptions object is built here (not at module level) because it
+  // depends on the runtime `insets` value.
+  const tabBarStyle = {
+    backgroundColor: Colors.surface,
+    borderTopColor: Colors.border,
+    borderTopWidth: 1,
+    height: 60 + insets.bottom,
+    paddingBottom: insets.bottom + 4,
+    paddingTop: 8,
+    // Elevation 0 removes the Android shadow that can cause a visual seam.
+    elevation: 0,
+  };
+
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarStyle: {
-          backgroundColor: Colors.surface,
-          borderTopColor: Colors.border,
-          borderTopWidth: 1,
-          height: 60 + insets.bottom,
-          paddingBottom: insets.bottom + 4,
-          paddingTop: 8,
-        },
+        tabBarStyle,
         tabBarActiveTintColor: Colors.primary,
         tabBarInactiveTintColor: Colors.textMuted,
         tabBarLabelStyle: {
           fontSize: 11,
           fontWeight: '500',
         },
+        // Disable the tab press animation ripple on Android —
+        // it can look out of place on dark themes.
+        tabBarHideOnKeyboard: true,
       }}
     >
       <Tabs.Screen
