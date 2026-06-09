@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "FullStack App",
-    "slug": "fullstack-app",
+    "name": "Audio Converter",
+    "slug": "audio-converter",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -16,14 +16,14 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.yourcompany.fullstackapp"
+      "bundleIdentifier": "com.yourcompany.audioconverter"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0f0f0f"
       },
-      "package": "com.yourcompany.fullstackapp"
+      "package": "com.yourcompany.audioconverter"
     },
     "web": {
       "bundler": "metro",
@@ -40,7 +40,7 @@
         }
       ]
     ],
-    "scheme": "fullstackapp",
+    "scheme": "audioconverter",
     "experiments": {
       "typedRoutes": false
     }
