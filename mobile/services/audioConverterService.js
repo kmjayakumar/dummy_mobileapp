@@ -8,6 +8,7 @@ const API_ROOT = (process.env.EXPO_PUBLIC_API_URL || 'http://10.0.2.2:5000/api')
 );
 
 const OUTPUT_DIR = `${FileSystem.documentDirectory}converted/`;
+const UPLOAD_CACHE_DIR = `${FileSystem.cacheDirectory}uploads/`;
 
 function toDisplayPath(uri) {
   return uri.startsWith('file://') ? uri : `file://${uri}`;
@@ -22,6 +23,38 @@ async function ensureOutputDir() {
   if (!info.exists) {
     await FileSystem.makeDirectoryAsync(OUTPUT_DIR, { intermediates: true });
   }
+}
+
+/** Copy content:// URIs to cache so multipart upload is stable on Android. */
+async function resolveUploadUri(sourceUri, fileName) {
+  if (!sourceUri) {
+    throw new Error('No file selected.');
+  }
+
+  if (sourceUri.startsWith('file://')) {
+    const info = await FileSystem.getInfoAsync(sourceUri);
+    if (!info.exists) {
+      throw new Error('Selected file no longer exists. Pick it again.');
+    }
+    return sourceUri;
+  }
+
+  const cacheInfo = await FileSystem.getInfoAsync(UPLOAD_CACHE_DIR);
+  if (!cacheInfo.exists) {
+    await FileSystem.makeDirectoryAsync(UPLOAD_CACHE_DIR, { intermediates: true });
+  }
+
+  const safeName = (fileName || 'upload.opus').replace(/[^\w.\-]/g, '_');
+  const destUri = `${UPLOAD_CACHE_DIR}${Date.now()}_${safeName}`;
+
+  await FileSystem.copyAsync({ from: sourceUri, to: destUri });
+
+  const copied = await FileSystem.getInfoAsync(destUri);
+  if (!copied.exists) {
+    throw new Error('Could not prepare the file for upload.');
+  }
+
+  return destUri;
 }
 
 async function getAuthHeaders() {
@@ -103,12 +136,15 @@ export async function convertOpusToWav(sourceUri, fileName, onProgress) {
 
   onProgress?.(5);
 
+  const uploadUri = await resolveUploadUri(sourceUri, fileName);
+  onProgress?.(10);
+
   const authHeaders = await getAuthHeaders();
   delete authHeaders['Content-Type'];
 
   const upload = await FileSystem.uploadAsync(
     `${API_ROOT}/audio/opus-to-wav`,
-    sourceUri,
+    uploadUri,
     {
       httpMethod: 'POST',
       uploadType: FileSystem.FileSystemUploadType.MULTIPART,

@@ -204,13 +204,17 @@ export default function ConverterScreen() {
   };
 
   const pickOpusFile = async () => {
+    if (isBusy) return;
+
     setError('');
     setSuccessMessage('');
 
     try {
+      // copyToCacheDirectory: false — copying large files on pick often crashes Android.
       const result = await DocumentPicker.getDocumentAsync({
-        type: ['audio/*', 'application/octet-stream'],
-        copyToCacheDirectory: true,
+        type: 'audio/*',
+        copyToCacheDirectory: false,
+        multiple: false,
       });
 
       if (result.canceled) return;
@@ -232,11 +236,23 @@ export default function ConverterScreen() {
         return;
       }
 
+      let size = asset.size;
+      try {
+        const info = await FileSystem.getInfoAsync(asset.uri);
+        if (!info.exists) {
+          setError('Selected file is not accessible. Try picking it again.');
+          return;
+        }
+        if (info.size != null) size = info.size;
+      } catch {
+        // URI may still work at upload time (e.g. content:// on Android)
+      }
+
       setSelectedFile({
         uri: asset.uri,
         name,
-        size: asset.size,
-        mimeType: asset.mimeType,
+        size,
+        mimeType: asset.mimeType || 'audio/opus',
       });
       resetOutputs();
     } catch (err) {
