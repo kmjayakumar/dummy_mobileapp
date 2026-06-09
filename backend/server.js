@@ -39,6 +39,24 @@ const startServer = async () => {
     runAudioFileCleanup();
     cleanupTimer = setInterval(runAudioFileCleanup, CLEANUP_INTERVAL_MS);
 
+    // ── Keep-alive ping (Render free tier sleeps after 15 min inactivity) ──
+    // Pings own /health endpoint every 10 minutes so the server never sleeps.
+    // Only runs in production — no need to ping during local development.
+    let keepAliveTimer;
+    if (process.env.NODE_ENV === 'production' && process.env.RENDER_EXTERNAL_URL) {
+      const PING_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+      const healthUrl = `${process.env.RENDER_EXTERNAL_URL}/health`;
+      keepAliveTimer = setInterval(async () => {
+        try {
+          const res = await fetch(healthUrl);
+          console.log(`[keep-alive] ping ${healthUrl} → ${res.status}`);
+        } catch (err) {
+          console.warn(`[keep-alive] ping failed: ${err.message}`);
+        }
+      }, PING_INTERVAL_MS);
+      console.log(`[keep-alive] Self-ping active every 10 min → ${healthUrl}`);
+    }
+
     // Connect to MongoDB
     await connectDB();
 
@@ -61,6 +79,7 @@ const startServer = async () => {
     const shutdown = (signal) => {
       console.log(`\n${signal} received. Shutting down gracefully...`);
       if (cleanupTimer) clearInterval(cleanupTimer);
+      if (keepAliveTimer) clearInterval(keepAliveTimer);
       server.close(() => {
         console.log('HTTP server closed.');
         process.exit(0);
