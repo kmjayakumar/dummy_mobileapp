@@ -30,10 +30,19 @@ const STAGE = {
   MP3: 'mp3',
 };
 
+// Defined outside the component — never recreated on re-render.
 const PHONE_OUTPUT_DIR = getConverterOutputDir();
 
 function displayPhonePath(uri) {
   return (uri || '').replace(/^file:\/\//, '');
+}
+
+// Pure helper — module-level so it's never a new reference inside the component.
+function formatFileSize(bytes) {
+  if (!bytes) return 'Unknown size';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 export default function ConverterScreen() {
@@ -53,6 +62,13 @@ export default function ConverterScreen() {
   const isBusy = activeStage !== STAGE.IDLE;
   const hasFile = Boolean(selectedFile?.uri);
 
+  // Stable getter — deps are the two output values only.
+  const getOutputByKind = useCallback((kind) => {
+    if (kind === 'wav') return wavOutput;
+    if (kind === 'mp3') return mp3Output;
+    return null;
+  }, [wavOutput, mp3Output]);
+
   const progressAnim = useRef(new Animated.Value(0)).current; // scaleX (0..1)
   useEffect(() => {
     const p = Math.max(0, Math.min(1, progress / 100));
@@ -68,12 +84,6 @@ export default function ConverterScreen() {
     setMp3Output(null);
     setSuccessMessage('');
   }, []);
-
-  const getOutputByKind = (kind) => {
-    if (kind === 'wav') return wavOutput;
-    if (kind === 'mp3') return mp3Output;
-    return null;
-  };
 
   const shareOutputFile = async (kind) => {
     const output = getOutputByKind(kind);
@@ -269,13 +279,6 @@ export default function ConverterScreen() {
     setActiveStage(STAGE.IDLE);
   };
 
-  const formatFileSize = (bytes) => {
-    if (!bytes) return 'Unknown size';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  };
-
   const convertToMp3 = async (wavResult = wavOutput) => {
     if (!wavResult?.wavPath || isBusy) {
       if (!wavResult?.wavPath) setError('Convert to WAV first.');
@@ -300,7 +303,7 @@ export default function ConverterScreen() {
         fileUri: result.uri,
         format: 'mp3',
         size: result.size,
-      });;
+      });
     } catch (err) {
       setError(err.message || 'MP3 conversion failed.');
     } finally {
@@ -612,7 +615,7 @@ export default function ConverterScreen() {
   );
 }
 
-function OutputRow({
+const OutputRow = React.memo(function OutputRow({
   icon,
   label,
   fileName,
@@ -670,9 +673,9 @@ function OutputRow({
       </View>
     </View>
   );
-}
+});
 
-function PipelineStep({ step, label, detail, done, last }) {
+const PipelineStep = React.memo(function PipelineStep({ step, label, detail, done, last }) {
   return (
     <View style={[styles.pipelineStep, !last && styles.pipelineStepBorder]}>
       <View style={[styles.pipelineBadge, done && styles.pipelineBadgeDone]}>
@@ -689,7 +692,7 @@ function PipelineStep({ step, label, detail, done, last }) {
       )}
     </View>
   );
-}
+});
 
 function FadeIn({ children }) {
   const opacity = useRef(new Animated.Value(0)).current;

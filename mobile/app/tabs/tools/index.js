@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import Colors from '../../../constants/colors';
 
+// Static data — defined outside so it is never recreated on re-render.
 const TOOLS = [
   {
     id: 'audio-converter',
@@ -19,7 +20,6 @@ const TOOLS = [
     title: 'Audio Converter',
     description: 'Opus → WAV → MP3',
     route: '/tabs/tools/audio-converter',
-    available: true,
   },
   {
     id: 'converted-files',
@@ -28,7 +28,6 @@ const TOOLS = [
     title: 'Converted Files',
     description: 'Browse, share and manage your files',
     route: '/tabs/tools/converted-files',
-    available: true,
   },
 ];
 
@@ -41,7 +40,53 @@ const COMING_SOON = [
   },
 ];
 
+// ─── sub-components (memoized so the list never re-renders unless data changes)
+
+const ToolItem = React.memo(function ToolItem({ tool, isLast, onPress }) {
+  return (
+    <TouchableOpacity
+      style={[styles.item, !isLast && styles.itemBorder]}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
+      <View style={[styles.iconWrap, { backgroundColor: tool.iconColor + '20' }]}>
+        <Ionicons name={tool.icon} size={22} color={tool.iconColor} />
+      </View>
+      <View style={styles.itemText}>
+        <Text style={styles.itemTitle}>{tool.title}</Text>
+        <Text style={styles.itemDesc}>{tool.description}</Text>
+      </View>
+      <Ionicons name="chevron-forward" size={18} color={Colors.textMuted} />
+    </TouchableOpacity>
+  );
+});
+
+const ComingSoonItem = React.memo(function ComingSoonItem({ tool, isLast }) {
+  return (
+    <View style={[styles.item, styles.itemDisabled, !isLast && styles.itemBorder]}>
+      <View style={[styles.iconWrap, { backgroundColor: Colors.border }]}>
+        <Ionicons name={tool.icon} size={22} color={Colors.textMuted} />
+      </View>
+      <View style={styles.itemText}>
+        <Text style={[styles.itemTitle, styles.textMuted]}>{tool.title}</Text>
+        <Text style={styles.itemDesc}>{tool.description}</Text>
+      </View>
+      <View style={styles.badge}>
+        <Text style={styles.badgeText}>Soon</Text>
+      </View>
+    </View>
+  );
+});
+
+// ─── screen ───────────────────────────────────────────────────────────────────
+
 export default function ToolsScreen() {
+  // One stable callback per tool, keyed by route, so ToolItem never re-renders
+  // on parent re-renders unrelated to navigation.
+  const handlePress = useCallback((route) => {
+    router.push(route);
+  }, []);
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView
@@ -52,54 +97,26 @@ export default function ToolsScreen() {
         <Text style={styles.pageTitle}>App Tools</Text>
         <Text style={styles.pageSubtitle}>Everything you need, in one place.</Text>
 
-        {/* Available tools */}
         <Text style={styles.sectionLabel}>Available</Text>
         <View style={styles.list}>
           {TOOLS.map((tool, index) => (
-            <TouchableOpacity
+            <ToolItem
               key={tool.id}
-              style={[
-                styles.item,
-                index < TOOLS.length - 1 && styles.itemBorder,
-              ]}
-              onPress={() => router.push(tool.route)}
-              activeOpacity={0.7}
-            >
-              <View style={[styles.iconWrap, { backgroundColor: tool.iconColor + '20' }]}>
-                <Ionicons name={tool.icon} size={22} color={tool.iconColor} />
-              </View>
-              <View style={styles.itemText}>
-                <Text style={styles.itemTitle}>{tool.title}</Text>
-                <Text style={styles.itemDesc}>{tool.description}</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={18} color={Colors.textMuted} />
-            </TouchableOpacity>
+              tool={tool}
+              isLast={index === TOOLS.length - 1}
+              onPress={() => handlePress(tool.route)}
+            />
           ))}
         </View>
 
-        {/* Coming soon */}
         <Text style={styles.sectionLabel}>Coming Soon</Text>
         <View style={styles.list}>
           {COMING_SOON.map((tool, index) => (
-            <View
+            <ComingSoonItem
               key={tool.id}
-              style={[
-                styles.item,
-                styles.itemDisabled,
-                index < COMING_SOON.length - 1 && styles.itemBorder,
-              ]}
-            >
-              <View style={[styles.iconWrap, { backgroundColor: Colors.border }]}>
-                <Ionicons name={tool.icon} size={22} color={Colors.textMuted} />
-              </View>
-              <View style={styles.itemText}>
-                <Text style={[styles.itemTitle, styles.textMuted]}>{tool.title}</Text>
-                <Text style={styles.itemDesc}>{tool.description}</Text>
-              </View>
-              <View style={styles.badge}>
-                <Text style={styles.badgeText}>Soon</Text>
-              </View>
-            </View>
+              tool={tool}
+              isLast={index === COMING_SOON.length - 1}
+            />
           ))}
         </View>
       </ScrollView>
