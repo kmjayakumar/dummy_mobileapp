@@ -17,11 +17,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
-import Button from '../../components/Button';
-import Card from '../../components/Card';
-import ErrorMessage from '../../components/ErrorMessage';
-import Colors from '../../constants/colors';
-import { convertOpusToWav, convertWavToMp3, getConverterOutputDir } from '../../services/audioConverterService';
+import Button from '../../../components/Button';
+import Card from '../../../components/Card';
+import ErrorMessage from '../../../components/ErrorMessage';
+import Colors from '../../../constants/colors';
+import { convertOpusToWav, convertWavToMp3, getConverterOutputDir } from '../../../services/audioConverterService';
+import { saveConversion } from '../../../services/conversionHistoryService';
 
 const STAGE = {
   IDLE: 'idle',
@@ -294,6 +295,12 @@ export default function ConverterScreen() {
       );
       setMp3Output(result);
       setSuccessMessage(`MP3 saved · ${result.fileName} (${formatFileSize(result.size)})`);
+      await saveConversion({
+        fileName: result.fileName,
+        fileUri: result.uri,
+        format: 'mp3',
+        size: result.size,
+      });;
     } catch (err) {
       setError(err.message || 'MP3 conversion failed.');
     } finally {
@@ -334,6 +341,12 @@ export default function ConverterScreen() {
       );
       setWavOutput(result);
       setSuccessMessage(`WAV saved · ${result.fileName} (${formatFileSize(result.size)})`);
+      await saveConversion({
+        fileName: result.fileName,
+        fileUri: result.uri,
+        format: 'wav',
+        size: result.size,
+      });
       promptConvertToMp3(result);
     } catch (err) {
       setError(err.message || 'WAV conversion failed.');
@@ -351,7 +364,7 @@ export default function ConverterScreen() {
         : null;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['bottom']}>
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.container}
