@@ -43,11 +43,11 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="converter"
+        name="tools"
         options={{
-          title: 'Convert',
+          title: 'App Tools',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="musical-notes-outline" size={size} color={color} />
+            <Ionicons name="hammer-outline" size={size} color={color} />
           ),
         }}
       />
