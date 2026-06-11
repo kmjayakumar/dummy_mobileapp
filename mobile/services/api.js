@@ -34,16 +34,16 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response) {
-      // Server responded with error
+      // Server responded with an error status
       const message =
         error.response.data?.message ||
         error.response.data?.error ||
         `Server error: ${error.response.status}`;
       return Promise.reject(new Error(message));
     } else if (error.request) {
-      // Request made but no response
+      // Request was made but no response received
       return Promise.reject(
-        new Error('Network error. Please check your connection and API URL.')
+        new Error('Network Error. Please check your connection and API URL.')
       );
     } else {
       return Promise.reject(new Error(error.message || 'Something went wrong'));
