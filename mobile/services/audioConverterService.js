@@ -18,6 +18,18 @@ function getBaseName(fileName) {
   return fileName.replace(/\.opus$/i, '');
 }
 
+/** Returns a timestamp string in DDMMYYYY_HHMMSS format. */
+function getTimestamp() {
+  const now = new Date();
+  const dd   = String(now.getDate()).padStart(2, '0');
+  const mm   = String(now.getMonth() + 1).padStart(2, '0');
+  const yyyy = now.getFullYear();
+  const HH   = String(now.getHours()).padStart(2, '0');
+  const MM   = String(now.getMinutes()).padStart(2, '0');
+  const SS   = String(now.getSeconds()).padStart(2, '0');
+  return `${dd}${mm}${yyyy}_${HH}${MM}${SS}`;
+}
+
 async function ensureOutputDir() {
   const info = await FileSystem.getInfoAsync(OUTPUT_DIR);
   if (!info.exists) {
@@ -126,7 +138,7 @@ async function downloadToOutput(downloadUrl, outputUri, onProgress) {
 export async function convertOpusToWav(sourceUri, fileName, onProgress) {
   await ensureOutputDir();
 
-  const baseName = getBaseName(fileName);
+  const baseName = `${getBaseName(fileName)}_${getTimestamp()}`;
   const outputUri = `${OUTPUT_DIR}${baseName}.wav`;
 
   const existing = await FileSystem.getInfoAsync(outputUri);
@@ -189,7 +201,7 @@ export async function convertWavToMp3(wavOutput, opusFileName, onProgress) {
 
   await ensureOutputDir();
 
-  const baseName = getBaseName(opusFileName);
+  const baseName = `${getBaseName(opusFileName)}_${getTimestamp()}`;
   const outputUri = `${OUTPUT_DIR}${baseName}.mp3`;
 
   const existing = await FileSystem.getInfoAsync(outputUri);
