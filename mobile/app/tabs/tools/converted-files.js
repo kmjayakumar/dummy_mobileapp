@@ -160,7 +160,14 @@ export default function ConvertedFilesScreen() {
   }, [checkMissing]);
 
   // Reload on focus only (not on every render).
-  useFocusEffect(loadHistory);
+  // useFocusEffect must receive a sync callback — async functions return a
+  // Promise which React Navigation treats as an accidental cleanup value and
+  // emits a warning. We wrap the async loadHistory in a plain sync callback.
+  useFocusEffect(
+    React.useCallback(() => {
+      loadHistory();
+    }, [loadHistory])
+  );
 
   // ── derived data (memoized — only recalculates when entries or search changes)
 

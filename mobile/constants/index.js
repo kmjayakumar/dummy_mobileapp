@@ -6,4 +6,4 @@ export const STORAGE_KEYS = {
   CONVERSION_HISTORY: '@conversion_history',
 };
 
-export const API_TIMEOUT = 15000;
+export const API_TIMEOUT = 30000; // 30s — accounts for Render free-tier cold starts

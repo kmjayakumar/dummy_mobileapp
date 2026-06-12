@@ -523,7 +523,7 @@ export default function ConverterScreen() {
 
               {wavOutput ? (
                 <OutputRow
-                  icon="waveform"
+                  icon="radio-outline"
                   label="WAV (KineMaster)"
                   fileName={wavOutput.fileName}
                   path={displayPhonePath(wavOutput.uri)}

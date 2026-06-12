@@ -48,6 +48,14 @@
     "scheme": "audioconverter",
     "experiments": {
       "typedRoutes": false
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "fb77539f-a0c6-4385-a711-aad5a886d604"
+      }
     }
   }
 }

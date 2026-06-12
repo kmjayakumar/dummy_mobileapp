@@ -16,14 +16,18 @@ app.use(helmet());
 // CORS configuration
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, Postman, etc.)
+    // Allow requests with no origin:
+    //   - Native mobile apps (React Native / Expo APK) never send an Origin header
+    //   - Postman, curl, health-check probes
     if (!origin) return callback(null, true);
-    
+
     const allowedOrigins = [
-      process.env.CORS_ORIGIN,
+      process.env.CORS_ORIGIN,       // set this in Render env vars if you have a web frontend
       'http://localhost:3000',
       'http://localhost:8081',
       'exp://localhost:8081',
+      'http://localhost:19000',
+      'http://localhost:19006',
     ].filter(Boolean);
 
     if (allowedOrigins.includes(origin)) {
@@ -33,11 +37,19 @@ const corsOptions = {
     // Android emulator (10.0.2.2) and local dev hosts
     const emulatorPattern = /^https?:\/\/10\.0\.2\.2(:\d+)?$/;
     const localhostPattern = /^https?:\/\/localhost(:\d+)?$/;
-    if (emulatorPattern.test(origin) || localhostPattern.test(origin)) {
+    // Expo Go / dev client deep-link origins
+    const expoPattern = /^exp:\/\//;
+    if (
+      emulatorPattern.test(origin) ||
+      localhostPattern.test(origin) ||
+      expoPattern.test(origin)
+    ) {
       return callback(null, true);
     }
 
-    callback(new Error('Not allowed by CORS'));
+    // In production, unknown browser origins are blocked.
+    // Mobile APKs are already handled above (no origin = allowed).
+    callback(new Error(`CORS: origin '${origin}' not allowed`));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
