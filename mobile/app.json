@@ -28,7 +28,17 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0f0f0f"
       },
-      "package": "com.yourcompany.audioconverter"
+      "package": "com.yourcompany.audioconverter",
+      "intentFilters": [
+        {
+          "action": "android.intent.action.SEND",
+          "category": ["android.intent.category.DEFAULT"],
+          "data": [
+            { "mimeType": "audio/*" },
+            { "mimeType": "application/octet-stream" }
+          ]
+        }
+      ]
     },
     "web": {
       "bundler": "metro",

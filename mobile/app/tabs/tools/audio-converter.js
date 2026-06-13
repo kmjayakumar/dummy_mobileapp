@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
+import { useLocalSearchParams } from 'expo-router';
 import Button from '../../../components/Button';
 import Card from '../../../components/Card';
 import ErrorMessage from '../../../components/ErrorMessage';
@@ -61,6 +62,39 @@ export default function ConverterScreen() {
 
   const isBusy = activeStage !== STAGE.IDLE;
   const hasFile = Boolean(selectedFile?.uri);
+
+  // ── Handle files shared into the app from Telegram, WhatsApp, etc. ──────────
+  // When the user long-presses an audio file in another app and shares it here,
+  // Android passes the URI via the intent. expo-router surfaces it as a search param.
+  const params = useLocalSearchParams();
+  useEffect(() => {
+    const sharedUri = params?.['android.intent.extra.STREAM'];
+    if (!sharedUri || selectedFile) return;
+
+    const loadShared = async () => {
+      try {
+        const uri = Array.isArray(sharedUri) ? sharedUri[0] : sharedUri;
+        const name = uri.split('/').pop()?.split('%2F').pop() || 'shared_audio.opus';
+
+        let size;
+        try {
+          const info = await FileSystem.getInfoAsync(uri);
+          size = info.size;
+        } catch {
+          // size unknown for content:// URIs — that's fine
+        }
+
+        setSelectedFile({ uri, name, size, mimeType: 'audio/opus' });
+        setError('');
+        resetOutputs();
+      } catch (err) {
+        setError('Could not load the shared file.');
+      }
+    };
+
+    loadShared();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params]);
 
   // Stable getter — deps are the two output values only.
   const getOutputByKind = useCallback((kind) => {
