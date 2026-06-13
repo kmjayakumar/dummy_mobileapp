@@ -32,7 +32,11 @@
       "intentFilters": [
         {
           "action": "android.intent.action.SEND",
-          "category": ["android.intent.category.DEFAULT"],
+          "autoVerify": true,
+          "isEntry": true,
+          "category": [
+            "android.intent.category.DEFAULT"
+          ],
           "data": [
             { "mimeType": "audio/*" },
             { "mimeType": "application/octet-stream" }
