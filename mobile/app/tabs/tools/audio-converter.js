@@ -17,16 +17,21 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
-import { useLocalSearchParams } from 'expo-router';
 import Button from '../../../components/Button';
 import Card from '../../../components/Card';
 import ErrorMessage from '../../../components/ErrorMessage';
 import Colors from '../../../constants/colors';
 import { convertOpusToWav, convertWavToMp3, getConverterOutputDir } from '../../../services/audioConverterService';
 import { saveConversion } from '../../../services/conversionHistoryService';
+import { useShareIntentContext } from '../../../context/ShareIntentContext';
+import { MIME_LABELS } from '../../../types/shareIntent';
+import { clearStagingFile } from '../../../services/shareIntentService';
+
+// ─── constants ───────────────────────────────────────────────────────────────
 
 const STAGE = {
   IDLE: 'idle',
+  IMPORTING: 'importing',
   WAV: 'wav',
   MP3: 'mp3',
 };
@@ -34,11 +39,12 @@ const STAGE = {
 // Defined outside the component — never recreated on re-render.
 const PHONE_OUTPUT_DIR = getConverterOutputDir();
 
+// ─── pure helpers (module-level) ─────────────────────────────────────────────
+
 function displayPhonePath(uri) {
   return (uri || '').replace(/^file:\/\//, '');
 }
 
-// Pure helper — module-level so it's never a new reference inside the component.
 function formatFileSize(bytes) {
   if (!bytes) return 'Unknown size';
   if (bytes < 1024) return `${bytes} B`;
@@ -46,64 +52,86 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function getMimeLabel(mimeType) {
+  return MIME_LABELS[mimeType?.toLowerCase()] || mimeType || 'Audio';
+}
+
+// ─── screen ──────────────────────────────────────────────────────────────────
+
 export default function ConverterScreen() {
   const [selectedFile, setSelectedFile] = useState(null);
-  const [wavOutput, setWavOutput] = useState(null);
-  const [mp3Output, setMp3Output] = useState(null);
-  const [activeStage, setActiveStage] = useState(STAGE.IDLE);
-  const [progress, setProgress] = useState(0);
+  const [wavOutput, setWavOutput]       = useState(null);
+  const [mp3Output, setMp3Output]       = useState(null);
+  const [activeStage, setActiveStage]   = useState(STAGE.IDLE);
+  const [progress, setProgress]         = useState(0);
   const [successMessage, setSuccessMessage] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError]               = useState('');
 
   const [renameModalVisible, setRenameModalVisible] = useState(false);
-  const [renameKind, setRenameKind] = useState(null); // 'wav' | 'mp3' | null
-  const [renameInput, setRenameInput] = useState('');
-  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameKind, setRenameKind]     = useState(null);
+  const [renameInput, setRenameInput]   = useState('');
+  const [renameBusy, setRenameBusy]     = useState(false);
 
-  const isBusy = activeStage !== STAGE.IDLE;
+  const isBusy  = activeStage !== STAGE.IDLE;
   const hasFile = Boolean(selectedFile?.uri);
 
-  // ── Handle files shared into the app from Telegram, WhatsApp, etc. ──────────
-  // When the user long-presses an audio file in another app and shares it here,
-  // Android passes the URI via the intent. expo-router surfaces it as a search param.
-  const params = useLocalSearchParams();
+  // Tracks the staged URI for the current shared file so we can delete it
+  // from cache/share_staging/ after conversion or when the user cancels.
+  // Only populated for files that arrived via share intent (source === 'share').
+  const stagedUriRef = useRef(null);
+
+  // ── Share Intent integration ────────────────────────────────────────────────
+  const {
+    pendingFile,
+    status: shareStatus,
+    error: shareError,
+    hasFile: hasSharedFile,
+    markProcessed,
+    clear: clearShareIntent,
+  } = useShareIntentContext();
+
+  // Import the shared file into the converter when it becomes ready.
+  // We only do this once per pending file (guarded by shareStatus === 'ready').
   useEffect(() => {
-    const sharedUri = params?.['android.intent.extra.STREAM'];
-    if (!sharedUri || selectedFile) return;
+    if (shareStatus !== 'ready' || !pendingFile) return;
 
-    const loadShared = async () => {
-      try {
-        const uri = Array.isArray(sharedUri) ? sharedUri[0] : sharedUri;
-        const name = uri.split('/').pop()?.split('%2F').pop() || 'shared_audio.opus';
+    // Guard: don't replace a file mid-conversion
+    if (isBusy) return;
 
-        let size;
-        try {
-          const info = await FileSystem.getInfoAsync(uri);
-          size = info.size;
-        } catch {
-          // size unknown for content:// URIs — that's fine
-        }
+    // Import: set the staged local URI as our selected file
+    setSelectedFile({
+      uri:      pendingFile.uri,
+      name:     pendingFile.name,
+      size:     pendingFile.size,
+      mimeType: pendingFile.mimeType,
+      source:   pendingFile.source,
+    });
+    // Remember the staged URI so we can clean it up after conversion or on cancel
+    stagedUriRef.current = pendingFile.source === 'share' ? pendingFile.uri : null;
+    resetOutputs();
+    setError('');
 
-        setSelectedFile({ uri, name, size, mimeType: 'audio/opus' });
-        setError('');
-        resetOutputs();
-      } catch (err) {
-        setError('Could not load the shared file.');
-      }
-    };
-
-    loadShared();
+    // Mark the intent as consumed so the context won't re-trigger
+    markProcessed();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params]);
+  }, [shareStatus, pendingFile]);
 
-  // Stable getter — deps are the two output values only.
+  // Show share intent errors in the screen's own error banner
+  useEffect(() => {
+    if (shareStatus === 'error' && shareError) {
+      setError(shareError);
+    }
+  }, [shareStatus, shareError]);
+
+  // ── stable derived getter ───────────────────────────────────────────────────
   const getOutputByKind = useCallback((kind) => {
     if (kind === 'wav') return wavOutput;
     if (kind === 'mp3') return mp3Output;
     return null;
   }, [wavOutput, mp3Output]);
 
-  const progressAnim = useRef(new Animated.Value(0)).current; // scaleX (0..1)
+  // ── progress bar animation ──────────────────────────────────────────────────
+  const progressAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     const p = Math.max(0, Math.min(1, progress / 100));
     Animated.timing(progressAnim, {
@@ -113,6 +141,7 @@ export default function ConverterScreen() {
     }).start();
   }, [progress, progressAnim]);
 
+  // ── helpers ─────────────────────────────────────────────────────────────────
   const resetOutputs = useCallback(() => {
     setWavOutput(null);
     setMp3Output(null);
@@ -123,8 +152,6 @@ export default function ConverterScreen() {
     const output = getOutputByKind(kind);
     if (!output) return;
     try {
-      // Lazy-load so this screen doesn't crash in runtimes
-      // that don't include the native ExpoSharing module.
       const Sharing = await import('expo-sharing');
       const isAvailable = await Sharing.isAvailableAsync?.();
       if (!isAvailable) {
@@ -132,7 +159,6 @@ export default function ConverterScreen() {
           'Sharing is not available in this build. Use a Dev Client / rebuild the native app to enable file sharing.'
         );
       }
-
       await Sharing.shareAsync(output.uri);
     } catch (err) {
       setError(err?.message || 'Failed to share file.');
@@ -158,15 +184,12 @@ export default function ConverterScreen() {
   };
 
   const renameOutputFile = async () => {
-    const kind = renameKind;
+    const kind   = renameKind;
     const output = getOutputByKind(kind);
     if (!output) return closeRenameModal();
 
     const raw = (renameInput || '').trim();
-    if (!raw) {
-      setError('Enter a new file name.');
-      return;
-    }
+    if (!raw) { setError('Enter a new file name.'); return; }
 
     setRenameBusy(true);
     setError('');
@@ -178,16 +201,14 @@ export default function ConverterScreen() {
         ? currentFileName.slice(currentFileName.lastIndexOf('.'))
         : '';
 
-      // Force the extension to stay consistent ('.wav' or '.mp3').
       let nextFileName = raw;
       if (ext) {
         const base = nextFileName.replace(new RegExp(`${ext}$`, 'i'), '');
         nextFileName = `${base}${ext}`;
       }
-
       nextFileName = nextFileName.replace(/[^a-zA-Z0-9._-]/g, '_');
 
-      const dirUri = output.uri.substring(0, output.uri.lastIndexOf('/') + 1);
+      const dirUri  = output.uri.substring(0, output.uri.lastIndexOf('/') + 1);
       const destUri = `${dirUri}${nextFileName}`;
 
       const existing = await FileSystem.getInfoAsync(destUri);
@@ -200,14 +221,7 @@ export default function ConverterScreen() {
       const outInfo = await FileSystem.getInfoAsync(destUri);
       if (!outInfo.exists) throw new Error('Renamed file not found after move.');
 
-      const updated = {
-        ...output,
-        uri: destUri,
-        path: destUri, // output.uri is already file://
-        fileName: nextFileName,
-        size: outInfo.size,
-      };
-
+      const updated = { ...output, uri: destUri, path: destUri, fileName: nextFileName, size: outInfo.size };
       if (kind === 'wav') setWavOutput(updated);
       if (kind === 'mp3') setMp3Output(updated);
 
@@ -248,14 +262,13 @@ export default function ConverterScreen() {
     );
   };
 
+  // ── file selection ──────────────────────────────────────────────────────────
   const pickOpusFile = async () => {
     if (isBusy) return;
-
     setError('');
     setSuccessMessage('');
 
     try {
-      // copyToCacheDirectory: false — copying large files on pick often crashes Android.
       const result = await DocumentPicker.getDocumentAsync({
         type: 'audio/*',
         copyToCacheDirectory: false,
@@ -271,15 +284,6 @@ export default function ConverterScreen() {
       }
 
       const name = asset.name || asset.uri.split('/').pop() || 'unknown';
-      const isOpus =
-        name.toLowerCase().endsWith('.opus') ||
-        asset.mimeType === 'audio/opus' ||
-        asset.mimeType === 'audio/ogg';
-
-      if (!isOpus) {
-        setError('Please select a .opus file.');
-        return;
-      }
 
       let size = asset.size;
       try {
@@ -293,11 +297,15 @@ export default function ConverterScreen() {
         // URI may still work at upload time (e.g. content:// on Android)
       }
 
+      // Clear any pending share intent when user manually picks a file
+      clearShareIntent();
+
       setSelectedFile({
-        uri: asset.uri,
+        uri:      asset.uri,
         name,
         size,
         mimeType: asset.mimeType || 'audio/opus',
+        source:   'picker',
       });
       resetOutputs();
     } catch (err) {
@@ -306,13 +314,20 @@ export default function ConverterScreen() {
   };
 
   const clearSelection = () => {
+    // Clean up staged file from share_staging/ if this was a shared file
+    if (stagedUriRef.current) {
+      clearStagingFile(stagedUriRef.current);
+      stagedUriRef.current = null;
+    }
     setSelectedFile(null);
     resetOutputs();
     setError('');
     setProgress(0);
     setActiveStage(STAGE.IDLE);
+    clearShareIntent();
   };
 
+  // ── conversion ──────────────────────────────────────────────────────────────
   const convertToMp3 = async (wavResult = wavOutput) => {
     if (!wavResult?.wavPath || isBusy) {
       if (!wavResult?.wavPath) setError('Convert to WAV first.');
@@ -325,19 +340,10 @@ export default function ConverterScreen() {
     setProgress(0);
 
     try {
-      const result = await convertWavToMp3(
-        wavResult,
-        selectedFile.name,
-        setProgress
-      );
+      const result = await convertWavToMp3(wavResult, selectedFile.name, setProgress);
       setMp3Output(result);
       setSuccessMessage(`MP3 saved · ${result.fileName} (${formatFileSize(result.size)})`);
-      await saveConversion({
-        fileName: result.fileName,
-        fileUri: result.uri,
-        format: 'mp3',
-        size: result.size,
-      });
+      await saveConversion({ fileName: result.fileName, fileUri: result.uri, format: 'mp3', size: result.size });
     } catch (err) {
       setError(err.message || 'MP3 conversion failed.');
     } finally {
@@ -352,10 +358,7 @@ export default function ConverterScreen() {
       'Proceed with Convert to MP3?',
       [
         { text: 'Not now', style: 'cancel' },
-        {
-          text: 'Convert to MP3',
-          onPress: () => convertToMp3(wavResult),
-        },
+        { text: 'Convert to MP3', onPress: () => convertToMp3(wavResult) },
       ],
       { cancelable: true }
     );
@@ -371,19 +374,24 @@ export default function ConverterScreen() {
     setMp3Output(null);
 
     try {
+      // Pass the actual MIME type so the server receives the correct content-type.
       const result = await convertOpusToWav(
         selectedFile.uri,
         selectedFile.name,
-        setProgress
+        setProgress,
+        selectedFile.mimeType,
       );
       setWavOutput(result);
       setSuccessMessage(`WAV saved · ${result.fileName} (${formatFileSize(result.size)})`);
-      await saveConversion({
-        fileName: result.fileName,
-        fileUri: result.uri,
-        format: 'wav',
-        size: result.size,
-      });
+      await saveConversion({ fileName: result.fileName, fileUri: result.uri, format: 'wav', size: result.size });
+
+      // Upload succeeded — the staged file is no longer needed. Clean it up
+      // before prompting for MP3 so cache is reclaimed as early as possible.
+      if (stagedUriRef.current) {
+        clearStagingFile(stagedUriRef.current);
+        stagedUriRef.current = null;
+      }
+
       promptConvertToMp3(result);
     } catch (err) {
       setError(err.message || 'WAV conversion failed.');
@@ -393,13 +401,16 @@ export default function ConverterScreen() {
     }
   };
 
+  // ── labels ───────────────────────────────────────────────────────────────────
   const convertingLabel =
-    activeStage === STAGE.WAV
-      ? 'Converting Opus → WAV…'
-      : activeStage === STAGE.MP3
-        ? 'Converting WAV → MP3…'
-        : null;
+    activeStage === STAGE.WAV     ? 'Converting to WAV…' :
+    activeStage === STAGE.MP3     ? 'Converting WAV → MP3…' :
+    activeStage === STAGE.IMPORTING ? 'Importing shared file…' :
+    null;
 
+  const isSharedFile = selectedFile?.source === 'share';
+
+  // ── render ────────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.safeArea} edges={['bottom']}>
       <ScrollView
@@ -407,16 +418,18 @@ export default function ConverterScreen() {
         contentContainerStyle={styles.container}
         showsVerticalScrollIndicator={false}
       >
+        {/* ── Header ── */}
         <View style={styles.header}>
           <View style={styles.headerIconWrap}>
             <Ionicons name="musical-notes" size={26} color={Colors.primary} />
           </View>
           <View style={styles.headerText}>
             <Text style={styles.pageTitle}>Audio Converter</Text>
-            <Text style={styles.subtitle}>Opus → WAV → MP3 · converted on your backend</Text>
+            <Text style={styles.subtitle}>Opus · OGG · AAC · MP3 → WAV → MP3</Text>
           </View>
         </View>
 
+        {/* ── Info banner ── */}
         <View style={styles.stepBanner}>
           <Ionicons name="phone-portrait-outline" size={18} color={Colors.info} />
           <Text style={styles.stepBannerText}>
@@ -424,6 +437,7 @@ export default function ConverterScreen() {
           </Text>
         </View>
 
+        {/* ── Storage path card ── */}
         <Card style={styles.storageCard}>
           <View style={styles.storageHeader}>
             <Ionicons name="folder-open" size={18} color={Colors.primary} />
@@ -440,8 +454,10 @@ export default function ConverterScreen() {
           </View>
         </Card>
 
+        {/* ── Error banner ── */}
         <ErrorMessage message={error} />
 
+        {/* ── Success banner ── */}
         {successMessage ? (
           <View style={styles.successBanner}>
             <Ionicons name="checkmark-circle" size={18} color={Colors.success} />
@@ -449,20 +465,52 @@ export default function ConverterScreen() {
           </View>
         ) : null}
 
+        {/* ── Receiving shared file banner ── */}
+        {shareStatus === 'receiving' ? (
+          <View style={styles.importBanner}>
+            <ActivityIndicator size="small" color={Colors.primary} style={{ marginRight: 8 }} />
+            <Text style={styles.importBannerText}>Importing shared file…</Text>
+          </View>
+        ) : null}
+
+        {/* ── Shared file origin badge ── */}
+        {isSharedFile && selectedFile ? (
+          <View style={styles.sharedBadge}>
+            <Ionicons name="share-social-outline" size={14} color={Colors.primary} />
+            <Text style={styles.sharedBadgeText}>
+              Shared from another app · {getMimeLabel(selectedFile.mimeType)}
+            </Text>
+          </View>
+        ) : null}
+
+        {/* ── Source file card ── */}
         <Card style={styles.section}>
           <Text style={styles.sectionTitle}>Source file</Text>
-          <Text style={styles.sectionHint}>Select a .opus file from your device</Text>
+          <Text style={styles.sectionHint}>
+            {isSharedFile
+              ? 'File received from share — ready to convert'
+              : 'Select an audio file from your device'}
+          </Text>
 
           {selectedFile ? (
             <View style={styles.fileCard}>
               <View style={styles.fileIconWrap}>
-                <Ionicons name="document-text" size={22} color={Colors.primary} />
+                <Ionicons
+                  name={isSharedFile ? 'share-social' : 'document-text'}
+                  size={22}
+                  color={Colors.primary}
+                />
               </View>
               <View style={styles.fileMeta}>
                 <Text style={styles.fileName} numberOfLines={2}>
                   {selectedFile.name}
                 </Text>
-                <Text style={styles.fileSize}>{formatFileSize(selectedFile.size)}</Text>
+                <Text style={styles.fileSize}>
+                  {formatFileSize(selectedFile.size)}
+                  {selectedFile.mimeType && selectedFile.mimeType !== 'audio/opus'
+                    ? `  ·  ${getMimeLabel(selectedFile.mimeType)}`
+                    : ''}
+                </Text>
               </View>
               <TouchableOpacity
                 onPress={clearSelection}
@@ -481,8 +529,10 @@ export default function ConverterScreen() {
               disabled={isBusy}
             >
               <Ionicons name="folder-open-outline" size={32} color={Colors.primary} />
-              <Text style={styles.pickTitle}>Tap to pick .opus file</Text>
-              <Text style={styles.pickHint}>Requires network access to your API server</Text>
+              <Text style={styles.pickTitle}>Tap to pick audio file</Text>
+              <Text style={styles.pickHint}>
+                Or share a file from Files, WhatsApp, Telegram…
+              </Text>
             </TouchableOpacity>
           )}
 
@@ -498,10 +548,9 @@ export default function ConverterScreen() {
           ) : null}
         </Card>
 
+        {/* ── Progress card ── */}
         {isBusy ? (
-          <FadeIn>{/*
-            Small animation to make conversion feel responsive.
-          */}
+          <FadeIn>
             <Card style={styles.progressCard}>
               <View style={styles.progressHeader}>
                 <ActivityIndicator size="small" color={Colors.primary} />
@@ -509,12 +558,7 @@ export default function ConverterScreen() {
               </View>
               <View style={styles.progressTrack}>
                 <Animated.View
-                  style={[
-                    styles.progressFill,
-                    {
-                      transform: [{ scaleX: progressAnim }],
-                    },
-                  ]}
+                  style={[styles.progressFill, { transform: [{ scaleX: progressAnim }] }]}
                 />
               </View>
               <Text style={styles.progressPercent}>{progress}%</Text>
@@ -522,12 +566,12 @@ export default function ConverterScreen() {
           </FadeIn>
         ) : null}
 
+        {/* ── Convert buttons ── */}
         <Card style={styles.section}>
           <Text style={styles.sectionTitle}>Convert</Text>
           <Text style={styles.sectionHint}>
             WAV for KineMaster · MP3 at 192 kbps for sharing
           </Text>
-
           <View style={styles.actions}>
             <Button
               title="Convert to WAV"
@@ -538,7 +582,7 @@ export default function ConverterScreen() {
             />
             <Button
               title="Convert to MP3"
-              onPress={convertToMp3}
+              onPress={() => convertToMp3()}
               variant="secondary"
               loading={activeStage === STAGE.MP3}
               disabled={!wavOutput?.wavPath || isBusy}
@@ -547,6 +591,7 @@ export default function ConverterScreen() {
           </View>
         </Card>
 
+        {/* ── Output files ── */}
         {(wavOutput || mp3Output) ? (
           <FadeIn>
             <Card style={styles.section} elevated>
@@ -588,13 +633,15 @@ export default function ConverterScreen() {
           </FadeIn>
         ) : null}
 
+        {/* ── Pipeline steps ── */}
         <Card style={styles.pipelineCard}>
           <Text style={styles.pipelineTitle}>Pipeline</Text>
-          <PipelineStep step="1" label="Opus → WAV" detail="Server-side FFmpeg (48 kHz)" done={Boolean(wavOutput)} />
+          <PipelineStep step="1" label="Opus / OGG / AAC → WAV" detail="Server-side FFmpeg (48 kHz)" done={Boolean(wavOutput)} />
           <PipelineStep step="2" label="WAV → MP3" detail="192 kbps" done={Boolean(mp3Output)} last />
         </Card>
       </ScrollView>
 
+      {/* ── Rename modal ── */}
       <Modal
         visible={renameModalVisible}
         transparent
@@ -611,7 +658,6 @@ export default function ConverterScreen() {
               <Text style={styles.modalHint}>
                 Enter a new name. Extension will stay {renameKind === 'wav' ? '.wav' : '.mp3'}.
               </Text>
-
               <TextInput
                 value={renameInput}
                 onChangeText={setRenameInput}
@@ -620,25 +666,12 @@ export default function ConverterScreen() {
                 autoCorrect={false}
                 editable={!renameBusy}
               />
-
               <View style={styles.modalActions}>
                 <View style={{ flex: 1 }}>
-                  <Button
-                    title="Cancel"
-                    variant="outline"
-                    size="sm"
-                    onPress={closeRenameModal}
-                    disabled={renameBusy}
-                  />
+                  <Button title="Cancel" variant="outline" size="sm" onPress={closeRenameModal} disabled={renameBusy} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button
-                    title={renameBusy ? 'Saving...' : 'Save'}
-                    size="sm"
-                    onPress={renameOutputFile}
-                    loading={renameBusy}
-                    disabled={renameBusy}
-                  />
+                  <Button title={renameBusy ? 'Saving...' : 'Save'} size="sm" onPress={renameOutputFile} loading={renameBusy} disabled={renameBusy} />
                 </View>
               </View>
             </View>
@@ -649,17 +682,11 @@ export default function ConverterScreen() {
   );
 }
 
+// ─── sub-components ───────────────────────────────────────────────────────────
+
 const OutputRow = React.memo(function OutputRow({
-  icon,
-  label,
-  fileName,
-  path,
-  color,
-  last,
-  onShare,
-  onRename,
-  onDelete,
-  actionsDisabled,
+  icon, label, fileName, path, color, last,
+  onShare, onRename, onDelete, actionsDisabled,
 }) {
   return (
     <View style={[styles.outputRow, !last && styles.outputRowBorder]}>
@@ -667,41 +694,17 @@ const OutputRow = React.memo(function OutputRow({
         <Ionicons name={icon} size={16} color={color} />
         <Text style={styles.outputLabel}>{label}</Text>
       </View>
-      {fileName ? (
-        <Text style={styles.outputFileName} selectable>
-          {fileName}
-        </Text>
-      ) : null}
+      {fileName ? <Text style={styles.outputFileName} selectable>{fileName}</Text> : null}
       <Text style={styles.outputPathLabel}>Full path on phone</Text>
-      <Text style={styles.outputPath} selectable>
-        {path}
-      </Text>
-
+      <Text style={styles.outputPath} selectable>{path}</Text>
       <View style={styles.outputActions}>
-        <TouchableOpacity
-          onPress={onShare}
-          disabled={actionsDisabled}
-          style={styles.iconBtn}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
+        <TouchableOpacity onPress={onShare}  disabled={actionsDisabled} style={styles.iconBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="share-social-outline" size={18} color={color} />
         </TouchableOpacity>
-
-        <TouchableOpacity
-          onPress={onRename}
-          disabled={actionsDisabled}
-          style={styles.iconBtn}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
+        <TouchableOpacity onPress={onRename} disabled={actionsDisabled} style={styles.iconBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="create-outline" size={18} color={color} />
         </TouchableOpacity>
-
-        <TouchableOpacity
-          onPress={onDelete}
-          disabled={actionsDisabled}
-          style={styles.iconBtn}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
+        <TouchableOpacity onPress={onDelete} disabled={actionsDisabled} style={styles.iconBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="trash-outline" size={18} color={Colors.error} />
         </TouchableOpacity>
       </View>
@@ -719,416 +722,118 @@ const PipelineStep = React.memo(function PipelineStep({ step, label, detail, don
         <Text style={styles.pipelineLabel}>{label}</Text>
         <Text style={styles.pipelineDetail}>{detail}</Text>
       </View>
-      {done ? (
-        <Ionicons name="checkmark-circle" size={20} color={Colors.success} />
-      ) : (
-        <Ionicons name="ellipse-outline" size={20} color={Colors.textMuted} />
-      )}
+      {done
+        ? <Ionicons name="checkmark-circle" size={20} color={Colors.success} />
+        : <Ionicons name="ellipse-outline"  size={20} color={Colors.textMuted} />}
     </View>
   );
 });
 
 function FadeIn({ children }) {
-  const opacity = useRef(new Animated.Value(0)).current;
+  const opacity    = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(8)).current;
 
   useEffect(() => {
     opacity.setValue(0);
     translateY.setValue(8);
     Animated.parallel([
-      Animated.timing(opacity, {
-        toValue: 1,
-        duration: 220,
-        useNativeDriver: true,
-      }),
-      Animated.timing(translateY, {
-        toValue: 0,
-        duration: 220,
-        useNativeDriver: true,
-      }),
+      Animated.timing(opacity,    { toValue: 1, duration: 220, useNativeDriver: true }),
+      Animated.timing(translateY, { toValue: 0, duration: 220, useNativeDriver: true }),
     ]).start();
   }, [opacity, translateY]);
 
-  return <Animated.View style={{ opacity, transform: [{ translateY }] }}>{children}</Animated.View>;
+  return (
+    <Animated.View style={{ opacity, transform: [{ translateY }] }}>
+      {children}
+    </Animated.View>
+  );
 }
 
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
-  scroll: { flex: 1 },
-  container: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 40,
-    gap: 4,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    marginBottom: 16,
-  },
-  headerIconWrap: {
-    width: 52,
-    height: 52,
-    borderRadius: 14,
-    backgroundColor: Colors.primary + '22',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerText: { flex: 1 },
-  pageTitle: {
-    fontSize: 26,
-    fontWeight: '700',
-    color: Colors.text,
-    letterSpacing: -0.5,
-  },
-  subtitle: {
-    fontSize: 13,
-    color: Colors.textSecondary,
-    marginTop: 4,
-  },
-  stepBanner: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    backgroundColor: Colors.info + '18',
-    borderWidth: 1,
-    borderColor: Colors.info + '40',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 16,
-  },
-  stepBannerText: {
-    flex: 1,
-    fontSize: 13,
-    color: Colors.info,
-    lineHeight: 19,
-  },
-  storageCard: {
-    marginBottom: 16,
-    gap: 8,
-    backgroundColor: Colors.primary + '0D',
-    borderWidth: 1,
-    borderColor: Colors.primary + '33',
-  },
-  storageHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  storageTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.text,
-  },
-  storageHint: {
-    fontSize: 12,
-    color: Colors.textMuted,
-    lineHeight: 17,
-  },
-  storagePathBox: {
-    marginTop: 4,
-    padding: 12,
-    borderRadius: 10,
-    backgroundColor: Colors.surfaceElevated,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    gap: 4,
-  },
-  storagePathLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: Colors.textSecondary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  storagePathValue: {
-    fontSize: 12,
-    color: Colors.text,
-    lineHeight: 18,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  warningBanner: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    backgroundColor: Colors.warning + '18',
-    borderWidth: 1,
-    borderColor: Colors.warning + '40',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 16,
-  },
-  warningBannerText: {
-    flex: 1,
-    fontSize: 12,
-    color: Colors.warning,
-    lineHeight: 18,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  successBanner: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    backgroundColor: Colors.success + '18',
-    borderWidth: 1,
-    borderColor: Colors.success + '40',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 16,
-  },
-  successText: {
-    flex: 1,
-    fontSize: 13,
-    color: Colors.success,
-    lineHeight: 19,
-  },
-  section: {
-    marginBottom: 16,
-    gap: 10,
-  },
-  sectionTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.text,
-  },
-  sectionHint: {
-    fontSize: 13,
-    color: Colors.textMuted,
-    marginBottom: 4,
-  },
-  pickArea: {
-    borderWidth: 1.5,
-    borderColor: Colors.primary + '55',
-    borderStyle: 'dashed',
-    borderRadius: 14,
-    paddingVertical: 28,
-    paddingHorizontal: 20,
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: Colors.primary + '0D',
-  },
-  pickTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.text,
-  },
-  pickHint: {
-    fontSize: 12,
-    color: Colors.textSecondary,
-  },
-  fileCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: Colors.surfaceElevated,
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  fileIconWrap: {
-    width: 44,
-    height: 44,
-    borderRadius: 10,
-    backgroundColor: Colors.primary + '22',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  fileMeta: { flex: 1 },
-  fileName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: Colors.text,
-  },
-  fileSize: {
-    fontSize: 12,
-    color: Colors.textMuted,
-    marginTop: 4,
-  },
-  clearBtn: {
-    padding: 4,
-  },
-  secondaryPickBtn: {
-    marginTop: 4,
-  },
-  progressCard: {
-    marginBottom: 16,
-    gap: 12,
-  },
-  progressHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  progressLabel: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: Colors.text,
-  },
-  progressTrack: {
-    height: 8,
-    backgroundColor: Colors.border,
-    borderRadius: 4,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: Colors.primary,
-    borderRadius: 4,
-  },
-  progressPercent: {
-    fontSize: 12,
-    color: Colors.textSecondary,
-    textAlign: 'right',
-  },
-  actions: {
-    gap: 12,
-    marginTop: 4,
-  },
-  actionBtn: {
-    width: '100%',
-  },
-  outputRow: {
-    paddingVertical: 12,
-    gap: 6,
-  },
-  outputRowBorder: {
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-  },
-  outputHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  outputLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: Colors.textSecondary,
-  },
-  outputFileName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: Colors.text,
-    marginTop: 2,
-  },
-  outputPathLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: Colors.textMuted,
-    marginTop: 6,
-    textTransform: 'uppercase',
-    letterSpacing: 0.3,
-  },
-  outputPath: {
-    fontSize: 12,
-    color: Colors.text,
-    lineHeight: 18,
-    fontFamily: 'monospace',
-  },
-  outputActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    marginTop: 6,
-  },
-  iconBtn: {
-    padding: 2,
-    borderRadius: 10,
-    backgroundColor: Colors.surfaceElevated,
-  },
-  pipelineCard: {
-    marginTop: 4,
-    gap: 0,
-  },
-  pipelineTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.text,
-    marginBottom: 12,
-  },
-  pipelineStep: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 12,
-  },
-  pipelineStepBorder: {
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-  },
-  pipelineBadge: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: Colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pipelineBadgeDone: {
-    backgroundColor: Colors.success + '33',
-  },
-  pipelineBadgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  pipelineContent: { flex: 1 },
-  pipelineLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: Colors.text,
-  },
-  pipelineDetail: {
-    fontSize: 12,
-    color: Colors.textMuted,
-    marginTop: 2,
-  },
+// ─── styles ───────────────────────────────────────────────────────────────────
 
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 18,
-  },
+const styles = StyleSheet.create({
+  safeArea:  { flex: 1, backgroundColor: Colors.background },
+  scroll:    { flex: 1 },
+  container: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 40, gap: 4 },
+
+  header:        { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 16 },
+  headerIconWrap: { width: 52, height: 52, borderRadius: 14, backgroundColor: Colors.primary + '22', alignItems: 'center', justifyContent: 'center' },
+  headerText:    { flex: 1 },
+  pageTitle:     { fontSize: 26, fontWeight: '700', color: Colors.text, letterSpacing: -0.5 },
+  subtitle:      { fontSize: 13, color: Colors.textSecondary, marginTop: 4 },
+
+  stepBanner:     { flexDirection: 'row', alignItems: 'flex-start', gap: 10, backgroundColor: Colors.info + '18', borderWidth: 1, borderColor: Colors.info + '40', borderRadius: 12, padding: 12, marginBottom: 16 },
+  stepBannerText: { flex: 1, fontSize: 13, color: Colors.info, lineHeight: 19 },
+
+  importBanner:     { flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.primary + '18', borderWidth: 1, borderColor: Colors.primary + '40', borderRadius: 12, padding: 12, marginBottom: 12 },
+  importBannerText: { fontSize: 13, color: Colors.primary, lineHeight: 19 },
+
+  sharedBadge:     { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: Colors.primary + '14', borderWidth: 1, borderColor: Colors.primary + '30', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, marginBottom: 8, alignSelf: 'flex-start' },
+  sharedBadgeText: { fontSize: 12, color: Colors.primary, fontWeight: '500' },
+
+  storageCard:     { marginBottom: 16, gap: 8, backgroundColor: Colors.primary + '0D', borderWidth: 1, borderColor: Colors.primary + '33' },
+  storageHeader:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  storageTitle:    { fontSize: 15, fontWeight: '600', color: Colors.text },
+  storageHint:     { fontSize: 12, color: Colors.textMuted, lineHeight: 17 },
+  storagePathBox:  { marginTop: 4, padding: 12, borderRadius: 10, backgroundColor: Colors.surfaceElevated, borderWidth: 1, borderColor: Colors.border, gap: 4 },
+  storagePathLabel: { fontSize: 11, fontWeight: '600', color: Colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.4 },
+  storagePathValue: { fontSize: 12, color: Colors.text, lineHeight: 18, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+
+  successBanner: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, backgroundColor: Colors.success + '18', borderWidth: 1, borderColor: Colors.success + '40', borderRadius: 12, padding: 12, marginBottom: 16 },
+  successText:   { flex: 1, fontSize: 13, color: Colors.success, lineHeight: 19 },
+
+  section:      { marginBottom: 16, gap: 10 },
+  sectionTitle: { fontSize: 15, fontWeight: '600', color: Colors.text },
+  sectionHint:  { fontSize: 13, color: Colors.textMuted, marginBottom: 4 },
+
+  pickArea:  { borderWidth: 1.5, borderColor: Colors.primary + '55', borderStyle: 'dashed', borderRadius: 14, paddingVertical: 28, paddingHorizontal: 20, alignItems: 'center', gap: 8, backgroundColor: Colors.primary + '0D' },
+  pickTitle: { fontSize: 15, fontWeight: '600', color: Colors.text },
+  pickHint:  { fontSize: 12, color: Colors.textSecondary, textAlign: 'center' },
+
+  fileCard:    { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: Colors.surfaceElevated, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: Colors.border },
+  fileIconWrap: { width: 44, height: 44, borderRadius: 10, backgroundColor: Colors.primary + '22', alignItems: 'center', justifyContent: 'center' },
+  fileMeta:    { flex: 1 },
+  fileName:    { fontSize: 14, fontWeight: '600', color: Colors.text },
+  fileSize:    { fontSize: 12, color: Colors.textMuted, marginTop: 4 },
+  clearBtn:    { padding: 4 },
+  secondaryPickBtn: { marginTop: 4 },
+
+  progressCard:    { marginBottom: 16, gap: 12 },
+  progressHeader:  { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  progressLabel:   { fontSize: 14, fontWeight: '500', color: Colors.text },
+  progressTrack:   { height: 8, backgroundColor: Colors.border, borderRadius: 4, overflow: 'hidden' },
+  progressFill:    { width: '100%', height: '100%', backgroundColor: Colors.primary, borderRadius: 4 },
+  progressPercent: { fontSize: 12, color: Colors.textSecondary, textAlign: 'right' },
+
+  actions:   { gap: 12, marginTop: 4 },
+  actionBtn: { width: '100%' },
+
+  outputRow:       { paddingVertical: 12, gap: 6 },
+  outputRowBorder: { borderBottomWidth: 1, borderBottomColor: Colors.border },
+  outputHeader:    { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  outputLabel:     { fontSize: 13, fontWeight: '600', color: Colors.textSecondary },
+  outputFileName:  { fontSize: 14, fontWeight: '600', color: Colors.text, marginTop: 2 },
+  outputPathLabel: { fontSize: 11, fontWeight: '600', color: Colors.textMuted, marginTop: 6, textTransform: 'uppercase', letterSpacing: 0.3 },
+  outputPath:      { fontSize: 12, color: Colors.text, lineHeight: 18, fontFamily: 'monospace' },
+  outputActions:   { flexDirection: 'row', alignItems: 'center', gap: 14, marginTop: 6 },
+  iconBtn:         { padding: 2, borderRadius: 10, backgroundColor: Colors.surfaceElevated },
+
+  pipelineCard:       { marginTop: 4, gap: 0 },
+  pipelineTitle:      { fontSize: 15, fontWeight: '600', color: Colors.text, marginBottom: 12 },
+  pipelineStep:       { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
+  pipelineStepBorder: { borderBottomWidth: 1, borderBottomColor: Colors.border },
+  pipelineBadge:      { width: 28, height: 28, borderRadius: 14, backgroundColor: Colors.border, alignItems: 'center', justifyContent: 'center' },
+  pipelineBadgeDone:  { backgroundColor: Colors.success + '33' },
+  pipelineBadgeText:  { fontSize: 12, fontWeight: '700', color: Colors.text },
+  pipelineContent:    { flex: 1 },
+  pipelineLabel:      { fontSize: 14, fontWeight: '600', color: Colors.text },
+  pipelineDetail:     { fontSize: 12, color: Colors.textMuted, marginTop: 2 },
+
+  modalOverlay:  { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center', padding: 18 },
   modalKeyboard: { width: '100%' },
-  modalCard: {
-    width: '100%',
-    backgroundColor: Colors.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    padding: 16,
-    gap: 10,
-  },
-  modalTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  modalHint: {
-    fontSize: 12,
-    color: Colors.textMuted,
-    lineHeight: 17,
-  },
-  modalInput: {
-    borderWidth: 1.5,
-    borderColor: Colors.primary + '55',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: Colors.text,
-    backgroundColor: Colors.surfaceElevated,
-  },
-  modalActions: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 6,
-  },
+  modalCard:     { width: '100%', backgroundColor: Colors.surface, borderRadius: 16, borderWidth: 1, borderColor: Colors.border, padding: 16, gap: 10 },
+  modalTitle:    { fontSize: 16, fontWeight: '700', color: Colors.text },
+  modalHint:     { fontSize: 12, color: Colors.textMuted, lineHeight: 17 },
+  modalInput:    { borderWidth: 1.5, borderColor: Colors.primary + '55', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, color: Colors.text, backgroundColor: Colors.surfaceElevated },
+  modalActions:  { flexDirection: 'row', gap: 10, marginTop: 6 },
 });

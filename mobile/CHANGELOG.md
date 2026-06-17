@@ -1,0 +1,206 @@
+# Changelog
+
+---
+
+## [Unreleased] — Android Share Intent + Production Fixes
+
+### Overview
+
+Added full Android Share Intent support so users can share audio files directly
+from Files, WhatsApp, Telegram, Google Drive, etc. into the app, which then
+automatically opens the converter screen with the file pre-loaded.
+Also fixed three production issues found during post-implementation audit.
+
+---
+
+## Feature: Android Share Intent
+
+### New Files
+
+#### `mobile/types/shareIntent.js`
+- JSDoc type definitions for `SharedFile`, `ShareIntentState`, `ShareIntentContextValue`
+- `SUPPORTED_AUDIO_TYPES` — accepted MIME type list
+- `MIME_LABELS` — human-readable labels for display
+- `MAX_SHARE_FILE_BYTES` — 200 MB size limit constant
+
+#### `mobile/services/shareIntentService.js`
+- `parseIntentParams(params)` — extracts URI and MIME from expo-router search params for both `ACTION_SEND` and `ACTION_VIEW` intents
+- `validateSharedFile({ uri, mimeType })` — rejects unsupported MIME types with a user-friendly message
+- `copySharedFileToStaging(sourceUri, fileName, onProgress)` — copies `content://` or `file://` URI into `cacheDirectory/share_staging/` before upload; required because `content://` permissions expire after the intent is consumed
+- `receiveSharedFile(params, onProgress)` — full pipeline: parse → validate → copy → return `SharedFile` object
+- `clearStagingDir()` — deletes the entire staging directory
+- `clearStagingFile(localUri)` — deletes a single staged file; safety-guarded to only target files inside the staging directory; never throws
+
+#### `mobile/context/ShareIntentContext.js`
+- `useReducer`-based global state machine with states: `idle → receiving → ready → processed → error`
+- Actions: `startReceiving`, `setSharedFile`, `markProcessed`, `setError`, `clear`
+- `processingRef` mutable ref prevents duplicate processing between re-renders
+- `isProcessing()` getter for external guards
+- `useShareIntentContext()` hook with provider-missing guard
+
+#### `mobile/hooks/useShareIntent.js`
+- Watches `useLocalSearchParams()` at the root layout level
+- `lastHandledUriRef` dedup guard prevents the same URI from being processed twice (params persist in URL while screen is mounted)
+- Calls `receiveSharedFile()` → updates context → navigates to `/tabs/tools/audio-converter`
+- Covers cold start, foreground, and background-wake scenarios via `singleTask` launch mode
+
+#### `mobile/components/ShareIntentHandler.js`
+- Renderless component that mounts `useShareIntent` at the root layout
+- Ensures intent detection runs regardless of which screen is currently active
+
+#### `mobile/plugins/withShareIntentAndroid.js`
+- Expo Config Plugin using `withAndroidManifest` from `@expo/config-plugins`
+- Injects all `ACTION_SEND` and `ACTION_VIEW` intent filters into `MainActivity`
+- Adds `READ_MEDIA_AUDIO` permission (Android 13+)
+- Idempotent — checks before inserting, safe to run on repeated `expo prebuild` calls
+
+#### `mobile/SHARE_INTENT_TESTING.md`
+- Full test matrix: 10 scenarios covering Files app, WhatsApp, Telegram, Google Drive, cold start, foreground, background, unsupported file, empty file, DocumentPicker coexistence
+- ADB command for verifying intent filter registration without opening another app
+- Notes on `expo prebuild --clean` safety
+
+---
+
+### Modified Files
+
+#### `mobile/app/_layout.js`
+- Wrapped tree in `<ShareIntentProvider>`
+- Mounted `<ShareIntentHandler />` inside the provider, above the `<Stack>`
+
+#### `mobile/app/tabs/tools/audio-converter.js`
+- Consumes `useShareIntentContext()` — when `shareStatus === 'ready'`, auto-imports `pendingFile` into `selectedFile` state
+- Added `stagedUriRef` to track the staged file URI for cleanup
+- Added "Importing shared file…" activity indicator banner (shown while `shareStatus === 'receiving'`)
+- Added "Shared from another app · {MIME label}" badge on the file card
+- Updated pick-area hint text to mention share flow
+- `clearSelection` cleans up staged file via `clearStagingFile` before resetting state
+- `convertToWav` cleans up staged file after successful upload (file is on server; local staging copy no longer needed)
+- `convertOpusToWav` call now passes `selectedFile.mimeType` as fourth argument
+- Removed old `useLocalSearchParams` stub (replaced by the context-based flow)
+
+#### `mobile/app.json`
+- Added `android.intentFilters` array — mirrors plugin filters for `expo prebuild` compatibility
+- Added `android.permissions` for `READ_EXTERNAL_STORAGE`, `READ_MEDIA_AUDIO`, `WRITE_EXTERNAL_STORAGE`
+- Added `./plugins/withShareIntentAndroid` to `plugins` array
+- `scheme` set to `audioconverter`
+
+#### `mobile/android/app/src/main/AndroidManifest.xml`
+- Added `ACTION_SEND` filters for `audio/*` and `application/octet-stream`
+- Added `ACTION_VIEW` filters for `audio/*`, `audio/opus`, `audio/ogg`, `audio/aac`, `audio/mpeg`, `audio/mp4`
+- Added `READ_MEDIA_AUDIO` permission
+- Added `<queries>` entry for `GET_CONTENT audio/*` (Android 11+ package visibility)
+
+---
+
+### Package Name Fix
+
+**Problem:** `build.gradle` declared `com.yourcompany.fullstackapp` while `app.json` declared `com.yourcompany.audioconverter`. Android uses `applicationId` from `build.gradle` as the real app identity — the share sheet and intent filters would register under the wrong ID.
+
+**Files changed:**
+
+| File | Change |
+|---|---|
+| `android/app/build.gradle` | `namespace` + `applicationId` → `com.yourcompany.audioconverter` |
+| `android/app/src/main/java/com/yourcompany/audioconverter/MainActivity.kt` | Moved from `fullstackapp/`; `package` declaration updated |
+| `android/app/src/main/java/com/yourcompany/audioconverter/MainApplication.kt` | Moved from `fullstackapp/`; `package` declaration updated |
+| `android/app/src/main/java/com/yourcompany/fullstackapp/MainActivity.kt` | Deleted |
+| `android/app/src/main/java/com/yourcompany/fullstackapp/MainApplication.kt` | Deleted |
+
+Package name is now `com.yourcompany.audioconverter` consistently across all five locations.
+
+---
+
+## Fix: Production Issues (Post-Audit)
+
+### Fix #1 — Hardcoded MIME Type During Upload
+
+**File:** `mobile/services/audioConverterService.js`
+
+**Problem:** Every file was uploaded with `mimeType: 'audio/opus'` regardless of actual type.
+AAC, MP3, OGG, M4A files were sent to the server with the wrong content-type header.
+
+**Change:** Added `resolveUploadMimeType(mimeType)` helper.
+- Accepts all known `audio/*` sub-types explicitly
+- Accepts any `audio/` prefixed type as a pass-through
+- Falls back to `application/octet-stream` for unknown/missing types
+
+`convertOpusToWav` signature extended with optional `mimeType` parameter.
+Upload now uses `resolveUploadMimeType(mimeType)` instead of the hardcoded literal.
+
+**Behaviour after fix:**
+
+| Input | Upload MIME |
+|---|---|
+| `.opus` | `audio/opus` |
+| `.ogg` | `audio/ogg` |
+| `.aac` | `audio/aac` |
+| `.mp3` | `audio/mpeg` |
+| `.m4a` | `audio/mp4` |
+| unknown | `application/octet-stream` |
+
+---
+
+### Fix #2 — Filename Base Name Stripping
+
+**File:** `mobile/services/audioConverterService.js`
+
+**Problem:** `getBaseName()` only stripped `.opus` extension.
+Input `voice.mp3` produced output filename `voice.mp3_20260618_120000.wav`.
+
+**Change:**
+```js
+// Before
+return fileName.replace(/\.opus$/i, '');
+
+// After
+return fileName.replace(/\.[^/.]+$/, '');
+```
+
+Generic regex strips any extension. Output filenames are now clean for all input types.
+
+**Examples:**
+
+| Input | Base name | WAV output |
+|---|---|---|
+| `voice.opus` | `voice` | `voice_18062026_120000.wav` |
+| `voice.mp3` | `voice` | `voice_18062026_120000.wav` |
+| `audio.aac` | `audio` | `audio_18062026_120000.wav` |
+| `recording.m4a` | `recording` | `recording_18062026_120000.wav` |
+| `track.ogg` | `track` | `track_18062026_120000.wav` |
+
+Timestamp suffix preserves uniqueness across multiple conversions of the same file.
+
+---
+
+### Fix #3 — Share Staging File Cleanup
+
+**Files:** `mobile/services/shareIntentService.js`, `mobile/app/tabs/tools/audio-converter.js`
+
+**Problem:** `clearStagingDir()` was exported but never called. Files copied into
+`cacheDirectory/share_staging/` accumulated indefinitely.
+
+**Changes:**
+
+`shareIntentService.js`:
+- `clearStagingDir()` — added `console.log` on success and `console.warn` on failure
+- `clearStagingFile(localUri)` — new function; deletes a single staged file
+  - Safety guard: only deletes URIs that start with `SHARE_STAGING_DIR`; silently skips anything outside
+  - Never throws — logs warnings; conversion flow is never interrupted by cleanup failure
+
+`audio-converter.js`:
+- Imported `clearStagingFile`
+- Added `stagedUriRef = useRef(null)` to track the current staged file URI
+- On share import: `stagedUriRef.current = pendingFile.uri`
+- `convertToWav` — calls `clearStagingFile(stagedUriRef.current)` after successful upload (file is on the server; staging copy no longer needed)
+- `clearSelection` (user cancels) — calls `clearStagingFile(stagedUriRef.current)` before resetting state
+
+**Cleanup is NOT triggered on WAV conversion failure** — intentional, so the user can retry without re-sharing the file.
+
+---
+
+## Architecture Notes
+
+- FFmpeg runs server-side; the mobile client uploads the source file and downloads the result. No on-device FFmpeg.
+- The share intent flow produces a `file://` URI in `share_staging/` before the upload. `audioConverterService.resolveUploadUri()` passes `file://` URIs straight through — no double-copy.
+- `expo prebuild --clean` is safe: the config plugin re-applies all intent filters to the freshly generated manifest. All JS files are unaffected by prebuild.
+- This feature requires a Development Build (`expo run:android` or EAS). It does not work in Expo Go.

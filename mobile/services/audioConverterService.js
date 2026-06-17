@@ -14,8 +14,17 @@ function toDisplayPath(uri) {
   return uri.startsWith('file://') ? uri : `file://${uri}`;
 }
 
+/**
+ * Strip the file extension from any audio filename.
+ * Examples:
+ *   voice.opus  → voice
+ *   track.mp3   → track
+ *   audio.aac   → audio
+ *   file.m4a    → file
+ *   noext       → noext
+ */
 function getBaseName(fileName) {
-  return fileName.replace(/\.opus$/i, '');
+  return fileName.replace(/\.[^/.]+$/, '');
 }
 
 /** Returns a timestamp string in DDMMYYYY_HHMMSS format. */
@@ -28,6 +37,30 @@ function getTimestamp() {
   const MM   = String(now.getMinutes()).padStart(2, '0');
   const SS   = String(now.getSeconds()).padStart(2, '0');
   return `${dd}${mm}${yyyy}_${HH}${MM}${SS}`;
+}
+
+/**
+ * Resolve the MIME type to use when uploading an audio file.
+ * Falls back to application/octet-stream if the type is absent or unrecognised.
+ */
+function resolveUploadMimeType(mimeType) {
+  const known = [
+    'audio/opus',
+    'audio/ogg',
+    'audio/aac',
+    'audio/mpeg',
+    'audio/mp3',
+    'audio/mp4',
+    'audio/wav',
+    'audio/x-wav',
+    'audio/flac',
+    'audio/webm',
+  ];
+  const normalised = (mimeType || '').toLowerCase().trim();
+  if (normalised && known.includes(normalised)) return normalised;
+  // audio/* catch-all — accept any audio sub-type the OS reports
+  if (normalised.startsWith('audio/')) return normalised;
+  return 'application/octet-stream';
 }
 
 async function ensureOutputDir() {
@@ -134,8 +167,14 @@ async function downloadToOutput(downloadUrl, outputUri, onProgress) {
 
 /**
  * POST /api/audio/opus-to-wav → { success, wavPath: "/downloads/output.wav" }
+ *
+ * @param {string}   sourceUri  - Local file:// or content:// URI
+ * @param {string}   fileName   - Original file name (used for base name + server param)
+ * @param {Function} onProgress - Progress callback (0-100)
+ * @param {string}   [mimeType] - Actual MIME type of the source file; defaults to
+ *                                application/octet-stream if omitted or unknown.
  */
-export async function convertOpusToWav(sourceUri, fileName, onProgress) {
+export async function convertOpusToWav(sourceUri, fileName, onProgress, mimeType) {
   await ensureOutputDir();
 
   const baseName = `${getBaseName(fileName)}_${getTimestamp()}`;
@@ -154,6 +193,10 @@ export async function convertOpusToWav(sourceUri, fileName, onProgress) {
   const authHeaders = await getAuthHeaders();
   delete authHeaders['Content-Type'];
 
+  // Use the actual MIME type so the server receives the correct content-type
+  // header in the multipart part — critical for non-Opus inputs (AAC, MP3, etc.)
+  const uploadMimeType = resolveUploadMimeType(mimeType);
+
   const upload = await FileSystem.uploadAsync(
     `${API_ROOT}/audio/opus-to-wav`,
     uploadUri,
@@ -161,7 +204,7 @@ export async function convertOpusToWav(sourceUri, fileName, onProgress) {
       httpMethod: 'POST',
       uploadType: FileSystem.FileSystemUploadType.MULTIPART,
       fieldName: 'file',
-      mimeType: 'audio/opus',
+      mimeType: uploadMimeType,
       parameters: { fileName },
       headers: authHeaders,
     }
