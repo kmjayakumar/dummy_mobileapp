@@ -204,3 +204,5 @@ Timestamp suffix preserves uniqueness across multiple conversions of the same fi
 - The share intent flow produces a `file://` URI in `share_staging/` before the upload. `audioConverterService.resolveUploadUri()` passes `file://` URIs straight through — no double-copy.
 - `expo prebuild --clean` is safe: the config plugin re-applies all intent filters to the freshly generated manifest. All JS files are unaffected by prebuild.
 - This feature requires a Development Build (`expo run:android` or EAS). It does not work in Expo Go.
+
+
