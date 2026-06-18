@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import Button from '../../../components/Button';
@@ -74,6 +75,8 @@ export default function ConverterScreen() {
 
   const isBusy  = activeStage !== STAGE.IDLE;
   const hasFile = Boolean(selectedFile?.uri);
+
+  const router = useRouter();
 
   // Tracks the staged URI for the current shared file so we can delete it
   // from cache/share_staging/ after conversion or when the user cancels.
@@ -639,6 +642,18 @@ export default function ConverterScreen() {
           <PipelineStep step="1" label="Opus / OGG / AAC → WAV" detail="Server-side FFmpeg (48 kHz)" done={Boolean(wavOutput)} />
           <PipelineStep step="2" label="WAV → MP3" detail="192 kbps" done={Boolean(mp3Output)} last />
         </Card>
+
+        {/* ── Converted files link ── */}
+        <TouchableOpacity
+          style={styles.convertedFilesLink}
+          onPress={() => router.push('/tabs/tools/converted-files')}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="folder-open-outline" size={16} color={Colors.primary} />
+          <Text style={styles.convertedFilesLinkText}>View converted files</Text>
+          <Ionicons name="chevron-forward" size={15} color={Colors.primary} />
+        </TouchableOpacity>
+
       </ScrollView>
 
       {/* ── Rename modal ── */}
@@ -828,6 +843,21 @@ const styles = StyleSheet.create({
   pipelineContent:    { flex: 1 },
   pipelineLabel:      { fontSize: 14, fontWeight: '600', color: Colors.text },
   pipelineDetail:     { fontSize: 12, color: Colors.textMuted, marginTop: 2 },
+
+  convertedFilesLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 8,
+    marginBottom: 8,
+    paddingVertical: 10,
+  },
+  convertedFilesLinkText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: Colors.primary,
+  },
 
   modalOverlay:  { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center', padding: 18 },
   modalKeyboard: { width: '100%' },

@@ -328,3 +328,159 @@ eas build --platform android --profile development
 - This feature requires a Development Build (`expo run:android` or EAS). It does not work in Expo Go.
 
 
+
+---
+
+## Fix: Cold-Start Race Condition — Share Intent Never Reaches JS
+
+**Commit title:**
+```
+fix(android): store pending intent in native module, pull after listener registers to fix cold-start race
+```
+
+### Problem
+
+On cold start the `DeviceEventEmitter.emit("ShareIntentReceived")` fired from `addReactInstanceEventListener` at the moment the React bridge became ready — but the JS `DeviceEventEmitter.addListener` in `useShareIntent` only registers *after* the React component tree mounts (~100–300ms later). The event fired into empty air. No file. App opened to Home page.
+
+On foreground/background intents this was not a problem (listener already registered), so the bug only manifested on cold start.
+
+### Root Cause (exact location)
+
+- `MainActivity.kt` — `emitShareIntent()` called inside `onReactContextInitialized`, which fires before `ShareIntentHandler` mounts
+- `hooks/useShareIntent.js` — `DeviceEventEmitter.addListener` registers too late; misses the cold-start emit
+
+### Fix — Files Changed
+
+#### New: `android/…/ShareIntentModule.kt`
+- New `ReactContextBaseJavaModule` named `ShareIntentModule`
+- Companion object holds `@Volatile var pendingUri` and `pendingMimeType`
+- Single `@ReactMethod fun getPendingIntent(promise: Promise)` — returns stored URI+MIME as a JS-readable map, then **clears** both vars so data cannot be delivered twice
+- Exposed to JS as `NativeModules.ShareIntentModule`
+
+#### New: `android/…/ShareIntentPackage.kt`
+- `ReactPackage` implementation that registers `ShareIntentModule`
+- Required for React Native to expose the module to JS
+
+#### Modified: `android/…/MainApplication.kt`
+- `getPackages()` now returns `PackageList(this).packages + ShareIntentPackage()`
+- Previously returned `PackageList(this).packages` only — module was not registered
+
+#### Modified: `android/…/MainActivity.kt`
+- Dual-delivery strategy:
+  - **Always** stores URI+MIME into `ShareIntentModule.pendingUri / pendingMimeType` (Path B — JS pull)
+  - If bridge is ready: also emits `DeviceEventEmitter` immediately (Path A — push, foreground)
+  - If bridge not ready: queues emit via `addReactInstanceEventListener` as backup (Path A delayed)
+- Both paths share a dedup guard in JS so only one delivery occurs regardless of which path wins
+
+#### Modified: `mobile/hooks/useShareIntent.js`
+- After registering `DeviceEventEmitter` listener, immediately calls `NativeModules.ShareIntentModule.getPendingIntent()`
+- If a pending intent exists (cold start), processes it through the same `processSharePayload()` pipeline
+- `lastHandledUriRef` dedup guard prevents double-processing if both push and pull deliver the same URI
+- Navigation (`router.navigate`) now reads `authLoadingRef` — waits for `isLoading === false` before pushing so `app/index.js` auth redirect cannot overwrite the navigation
+- Added `useAuth` import to access `isLoading`
+
+### End-to-End Flow After Fix
+
+```
+Cold start:
+  MainActivity.onCreate → stores URI in ShareIntentModule.pendingUri
+  → addReactInstanceEventListener queues emit
+  → React bridge ready → emit fires (may miss JS listener)
+  → ShareIntentHandler mounts → listener registers
+  → getPendingIntent() called → finds stored URI → processSharePayload()
+  → file staged → context status=ready → nav retry loop starts
+  → authLoading=false → router.navigate('/tabs/tools/audio-converter')
+  → screen mounts → useEffect imports file → Convert button enabled
+
+Foreground/background:
+  onNewIntent → stores URI → bridge already ready → emit fires
+  → JS listener already registered → handleShareEvent() fires immediately
+  → same pipeline → navigation instant (attempt #1)
+```
+
+---
+
+## Fix: Auth Redirect Overwrites Share Intent Navigation
+
+**Commit title:**
+```
+fix(navigation): defer router.navigate until auth isLoading=false
+```
+
+### Problem
+
+On cold start, `app/index.js` renders `<LoadingScreen>` while `isLoading === true`, then redirects to `/tabs/home` when auth resolves. If `router.navigate('/tabs/tools/audio-converter')` fired during `isLoading`, the subsequent `/tabs/home` redirect overwrote it.
+
+### Fix
+
+`hooks/useShareIntent.js` — navigation retry loop checks `authLoadingRef.current` on every interval tick. Skips the `router.navigate()` call while auth is still loading. Once `isLoading` becomes `false`, the next tick fires the navigation successfully.
+
+No other files changed for this fix.
+
+---
+
+## Feature: "View Converted Files" Link on Audio Converter Screen
+
+**Commit title:**
+```
+feat(ui): add View Converted Files link at bottom of Audio Converter screen
+```
+
+### What Was Added
+
+`mobile/app/tabs/tools/audio-converter.js`
+
+A tappable link row at the bottom of the scroll view, below the Pipeline card:
+
+```
+📂  View converted files  ›
+```
+
+- Folder icon + label + chevron, all in `Colors.primary` (purple)
+- Tapping calls `router.push('/tabs/tools/converted-files')`
+- Sits at the bottom of the screen so it's visible after using the converter
+- Does not affect any other UI or conversion logic
+
+**Changes in this file:**
+1. Added `import { useRouter } from 'expo-router'`
+2. Added `const router = useRouter()` inside the component
+3. Added `<TouchableOpacity>` link between Pipeline card and `</ScrollView>`
+4. Added `convertedFilesLink` and `convertedFilesLinkText` styles
+
+---
+
+## Debug: Added Share Intent Logging
+
+**Commit title:**
+```
+debug(shareIntent): add checkpoint logging across native and JS layers
+```
+
+### Logging Added
+
+**`MainActivity.kt`** — `android.util.Log.d(TAG, ...)` at every step:
+- `onCreate` / `onNewIntent` — logs action, type, data
+- URI extraction result
+- React context readiness
+- `emitShareIntent` call confirmation
+
+**`hooks/useShareIntent.js`** — `console.log` at 8 checkpoints:
+- CHECKPOINT 1: raw event received
+- CHECKPOINT 2: dedup guards
+- CHECKPOINT 3: MIME validation
+- CHECKPOINT 4: filename extraction
+- CHECKPOINT 5: staging copy
+- CHECKPOINT 6: SharedFile object built
+- CHECKPOINT 7: context updated
+- CHECKPOINT 8: navigation started
+
+**`components/ShareIntentHandler.js`** — mount/unmount confirmation log
+
+**How to read logs:**
+```bash
+# Native (Kotlin)
+adb logcat | findstr ShareIntent
+
+# JS (Metro console)
+Filter by: [ShareIntent]
+```

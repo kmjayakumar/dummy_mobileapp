@@ -1,32 +1,31 @@
 /**
  * useShareIntent.js
  *
- * Listens for the "ShareIntentReceived" event emitted by MainActivity.kt
- * whenever the user shares an audio file into the app.
+ * Handles Android Share Intent end-to-end:
  *
- * Covers all three lifecycle cases:
- *   - Cold start   : MainActivity.onCreate  → emits after bridge is ready
- *   - Foreground   : MainActivity.onNewIntent → emits immediately
- *   - Background   : same as foreground (singleTask launch mode)
+ *   Cold start delivery (race-condition fix)
+ *   ─────────────────────────────────────────
+ *   After registering the DeviceEventEmitter listener, we immediately call
+ *   NativeModules.ShareIntentModule.getPendingIntent().  This pulls any
+ *   intent that MainActivity stored before the JS bridge was ready — the
+ *   event that was fired into empty air because no listener existed yet.
  *
- * Navigation timing fix
- * ─────────────────────
- * On cold start the React navigation stack is not mounted when the native
- * event fires.  Calling router.push() before the navigator is ready silently
- * drops the navigation.  We solve this with two cooperating pieces:
+ *   Foreground / background delivery
+ *   ──────────────────────────────────
+ *   DeviceEventEmitter fires while the listener is already registered,
+ *   so delivery is immediate.  getPendingIntent() returns null (already
+ *   cleared) so there is no double-processing.
  *
- *   1. The file is always staged and stored in ShareIntentContext first,
- *      regardless of navigator state.
- *
- *   2. Navigation is attempted via a retry loop that waits until the router
- *      reports it can accept pushes.  On foreground/background intents the
- *      navigator is already ready so the push fires on the first attempt.
- *      On cold start it retries every 100 ms for up to 3 seconds.
+ *   Auth guard
+ *   ───────────
+ *   router.navigate() is deferred until isLoading === false so the
+ *   auth redirect in app/index.js cannot overwrite the navigation.
  */
 
 import { useEffect, useRef, useCallback } from 'react';
-import { DeviceEventEmitter, Platform, Alert } from 'react-native';
+import { DeviceEventEmitter, NativeModules, Platform, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useAuth } from '../context/AuthContext';
 import { useShareIntentContext } from '../context/ShareIntentContext';
 import {
   validateSharedFile,
@@ -37,17 +36,20 @@ import {
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
-const CONVERTER_ROUTE   = '/tabs/tools/audio-converter';
+const CONVERTER_ROUTE    = '/tabs/tools/audio-converter';
 const SHARE_INTENT_EVENT = 'ShareIntentReceived';
+const TAG = '[ShareIntent]';
 
-// Navigation retry config for cold-start timing
-const NAV_RETRY_INTERVAL_MS = 100;   // check every 100 ms
-const NAV_RETRY_MAX_ATTEMPTS = 30;   // give up after 3 seconds
+// Navigation retry — waits for auth + navigator to be ready
+const NAV_RETRY_INTERVAL_MS  = 150;
+const NAV_RETRY_MAX_ATTEMPTS = 40;   // 6 seconds max
 
 // ─── hook ─────────────────────────────────────────────────────────────────────
 
 export function useShareIntent() {
   const router = useRouter();
+  const { isLoading: authLoading } = useAuth();
+
   const {
     status,
     error,
@@ -60,89 +62,94 @@ export function useShareIntent() {
     isProcessing,
   } = useShareIntentContext();
 
-  // Dedup guard — tracks the last URI we started processing
   const lastHandledUriRef = useRef(null);
+  const navRetryTimerRef  = useRef(null);
 
-  // Tracks a pending navigate-after-ready interval so we can cancel it on unmount
-  const navRetryTimerRef = useRef(null);
+  // Keep a ref to authLoading so the nav retry closure always reads fresh value
+  const authLoadingRef = useRef(authLoading);
+  useEffect(() => { authLoadingRef.current = authLoading; }, [authLoading]);
 
-  // ── navigation helper ──────────────────────────────────────────────────────
-  /**
-   * Push to the converter screen.
-   *
-   * On cold start expo-router's navigator may not be ready to accept pushes
-   * yet — calling router.push() on an unmounted navigator is silently dropped.
-   * We poll until router.canGoBack() is defined (navigator mounted) or fall
-   * back to router.replace() if push keeps failing.
-   *
-   * router.navigate() is used instead of router.push() because:
-   *   - If the user is already on the converter screen it replaces in-place
-   *     rather than stacking a duplicate.
-   *   - If they are elsewhere it pushes correctly.
-   */
+  // ── navigation ─────────────────────────────────────────────────────────────
   const navigateToConverter = useCallback(() => {
-    // Clear any existing retry timer
     if (navRetryTimerRef.current) {
       clearInterval(navRetryTimerRef.current);
       navRetryTimerRef.current = null;
     }
 
     let attempts = 0;
+    console.log(`${TAG} Navigation retry loop starting → ${CONVERTER_ROUTE}`);
 
     navRetryTimerRef.current = setInterval(() => {
       attempts++;
 
+      // Wait until auth state is resolved so index.js redirect doesn't win
+      if (authLoadingRef.current) {
+        console.log(`${TAG} Nav attempt #${attempts} — auth still loading, waiting…`);
+        return;
+      }
+
       try {
-        // expo-router exposes router.navigate() which works as push/replace
-        // depending on whether the target is already on the stack.
         router.navigate(CONVERTER_ROUTE);
-        // If we get here without throwing, navigation was accepted.
+        console.log(`${TAG} Navigation accepted on attempt #${attempts} ✓`);
         clearInterval(navRetryTimerRef.current);
         navRetryTimerRef.current = null;
-      } catch {
-        // Navigator not ready yet — will retry
+      } catch (e) {
+        console.log(`${TAG} Navigation attempt #${attempts} not ready: ${e?.message}`);
       }
 
       if (attempts >= NAV_RETRY_MAX_ATTEMPTS) {
-        // Give up gracefully — the file is still in context so the converter
-        // screen will pick it up if the user navigates there manually.
+        console.warn(`${TAG} Navigation gave up after ${attempts} attempts. File stays in context.`);
         clearInterval(navRetryTimerRef.current);
         navRetryTimerRef.current = null;
       }
     }, NAV_RETRY_INTERVAL_MS);
   }, [router]);
 
-  // ── event handler ──────────────────────────────────────────────────────────
-  const handleShareEvent = useCallback(async (event) => {
-    if (Platform.OS !== 'android') return;
+  // ── core pipeline ──────────────────────────────────────────────────────────
+  /**
+   * Process a raw { uri, mimeType } payload from either:
+   *   - DeviceEventEmitter (foreground/background)
+   *   - getPendingIntent() pull (cold start)
+   */
+  const processSharePayload = useCallback(async ({ uri: rawUri, mimeType: rawMime }) => {
+    console.log(`${TAG} processSharePayload  uri=${rawUri}  mime="${rawMime}"`);
 
-    const rawUri  = event?.uri      || null;
-    const rawMime = event?.mimeType || '';
+    if (!rawUri) {
+      console.warn(`${TAG} No URI — aborting`);
+      return;
+    }
 
-    if (!rawUri) return;
-
-    // Dedup: same URI already in flight or already processed
-    if (lastHandledUriRef.current === rawUri) return;
-    if (isProcessing()) return;
+    // Dedup guard
+    if (lastHandledUriRef.current === rawUri) {
+      console.log(`${TAG} Duplicate URI — already handled`);
+      return;
+    }
+    if (isProcessing()) {
+      console.log(`${TAG} Another share in flight — skipping`);
+      return;
+    }
 
     lastHandledUriRef.current = rawUri;
     startReceiving();
 
     try {
-      // 1. Validate MIME before doing any file I/O
+      // 1. Validate
       const validationError = validateSharedFile({ uri: rawUri, mimeType: rawMime });
       if (validationError) throw new Error(validationError);
+      console.log(`${TAG} Validation passed ✓`);
 
-      // 2. Derive a safe filename
+      // 2. Filename
       const rawName     = extractFileName(rawUri);
       const nameWithExt = ensureAudioExtensionFromMime(rawName, rawMime);
+      console.log(`${TAG} File name: ${nameWithExt}`);
 
-      // 3. Copy content:// → local file:// in app-private staging dir
+      // 3. Stage file
+      console.log(`${TAG} Staging from: ${rawUri}`);
       const { localUri, size } = await copySharedFileToStaging(rawUri, nameWithExt);
+      console.log(`${TAG} Staged → ${localUri}  (${size} bytes)`);
 
-      // 4. Resolve final MIME (some apps send an empty type)
+      // 4. Build SharedFile
       const mimeType = rawMime || guessMimeFromName(nameWithExt);
-
       const sharedFile = {
         uri:      localUri,
         name:     nameWithExt,
@@ -150,49 +157,81 @@ export function useShareIntent() {
         size,
         source:   'share',
       };
+      console.log(`${TAG} SharedFile ready:`, JSON.stringify(sharedFile));
 
-      // 5. Store in context — converter screen will auto-import when it mounts
+      // 5. Store in context
       setSharedFile(sharedFile);
+      console.log(`${TAG} Context → status=ready`);
 
-      // 6. Navigate — retries until the navigator is ready (cold-start safe)
+      // 6. Navigate (auth-aware retry)
       navigateToConverter();
 
     } catch (err) {
-      const message = err?.message || 'Could not import the shared file.';
-      setError(message);
+      console.error(`${TAG} Pipeline error: ${err?.message}`);
+      lastHandledUriRef.current = null;
+      setError(err?.message || 'Could not import the shared file.');
       Alert.alert(
         'Could not import file',
-        message,
-        [{
-          text: 'OK',
-          onPress: () => {
-            lastHandledUriRef.current = null;
-            clear();
-          },
-        }],
+        err?.message || 'Could not import the shared file.',
+        [{ text: 'OK', onPress: () => { lastHandledUriRef.current = null; clear(); } }],
         { cancelable: true },
       );
     }
   }, [isProcessing, startReceiving, setSharedFile, setError, clear, navigateToConverter]);
 
-  // ── listener registration ──────────────────────────────────────────────────
+  // ── DeviceEventEmitter handler (foreground / background) ──────────────────
+  const handleShareEvent = useCallback((event) => {
+    console.log(`${TAG} DeviceEventEmitter fired:`, JSON.stringify(event));
+    processSharePayload({
+      uri:      event?.uri      || null,
+      mimeType: event?.mimeType || '',
+    });
+  }, [processSharePayload]);
+
+  // ── listener registration + cold-start pull ────────────────────────────────
   useEffect(() => {
     if (Platform.OS !== 'android') return;
 
-    const subscription = DeviceEventEmitter.addListener(
-      SHARE_INTENT_EVENT,
-      handleShareEvent,
-    );
+    // 1. Register live listener first
+    console.log(`${TAG} Registering DeviceEventEmitter listener`);
+    const subscription = DeviceEventEmitter.addListener(SHARE_INTENT_EVENT, handleShareEvent);
+    console.log(`${TAG} Listener registered ✓`);
+
+    // 2. Pull any intent that arrived before this listener existed (cold start)
+    const ShareIntentModule = NativeModules.ShareIntentModule;
+    if (ShareIntentModule?.getPendingIntent) {
+      console.log(`${TAG} Calling getPendingIntent() for cold-start data`);
+      ShareIntentModule.getPendingIntent()
+        .then((pending) => {
+          if (pending?.uri) {
+            console.log(`${TAG} Cold-start pending intent found: uri=${pending.uri}`);
+            // The DeviceEventEmitter may have already delivered this via the
+            // addReactInstanceEventListener path.  processSharePayload's dedup
+            // guard (lastHandledUriRef) ensures we don't process it twice.
+            processSharePayload({
+              uri:      pending.uri,
+              mimeType: pending.mimeType || '',
+            });
+          } else {
+            console.log(`${TAG} No cold-start pending intent`);
+          }
+        })
+        .catch((e) => {
+          console.warn(`${TAG} getPendingIntent error: ${e?.message}`);
+        });
+    } else {
+      console.warn(`${TAG} ShareIntentModule not found — rebuild required`);
+    }
 
     return () => {
+      console.log(`${TAG} Removing listener`);
       subscription.remove();
-      // Cancel any pending navigation retry on unmount
       if (navRetryTimerRef.current) {
         clearInterval(navRetryTimerRef.current);
         navRetryTimerRef.current = null;
       }
     };
-  }, [handleShareEvent]);
+  }, [handleShareEvent, processSharePayload]);
 
   // ── public API ─────────────────────────────────────────────────────────────
   const dismiss = useCallback(() => {

@@ -1,19 +1,22 @@
 /**
- * ShareIntentHandler.js
+ * ShareIntentHandler.js  —  DEBUG BUILD
  *
- * Renderless component that lives in the root layout.
- * It mounts the useShareIntent hook at the top of the navigation tree,
- * ensuring share intents are detected regardless of which screen is
- * currently active (cold-start, foreground, background-wake).
- *
- * Returns null — no UI is rendered here.  All UI feedback is handled
- * inside the audio-converter screen via useShareIntentContext().
+ * Renderless root-level component that mounts useShareIntent.
+ * Logs on mount/unmount so you can confirm it's in the tree.
  */
 
+import { useEffect } from 'react';
 import { useShareIntent } from '../hooks/useShareIntent';
 
 export default function ShareIntentHandler() {
-  // All logic is in the hook; this component just mounts it at the root.
   useShareIntent();
+
+  useEffect(() => {
+    console.log('[ShareIntent] ShareIntentHandler mounted ✓');
+    return () => {
+      console.log('[ShareIntent] ShareIntentHandler unmounted');
+    };
+  }, []);
+
   return null;
 }
