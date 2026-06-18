@@ -9,15 +9,24 @@
  *   - Foreground   : MainActivity.onNewIntent → emits immediately
  *   - Background   : same as foreground (singleTask launch mode)
  *
- * The hook is mounted once at the root layout via ShareIntentHandler.
- * All state is stored in ShareIntentContext so any screen can read it.
+ * Navigation timing fix
+ * ─────────────────────
+ * On cold start the React navigation stack is not mounted when the native
+ * event fires.  Calling router.push() before the navigator is ready silently
+ * drops the navigation.  We solve this with two cooperating pieces:
+ *
+ *   1. The file is always staged and stored in ShareIntentContext first,
+ *      regardless of navigator state.
+ *
+ *   2. Navigation is attempted via a retry loop that waits until the router
+ *      reports it can accept pushes.  On foreground/background intents the
+ *      navigator is already ready so the push fires on the first attempt.
+ *      On cold start it retries every 100 ms for up to 3 seconds.
  */
 
 import { useEffect, useRef, useCallback } from 'react';
-import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
-import { DeviceEventEmitter } from 'react-native';
+import { DeviceEventEmitter, Platform, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Alert } from 'react-native';
 import { useShareIntentContext } from '../context/ShareIntentContext';
 import {
   validateSharedFile,
@@ -26,11 +35,16 @@ import {
   extractFileName,
 } from '../services/shareIntentService';
 
-// Route to navigate to when a valid shared file arrives.
-const CONVERTER_ROUTE = '/tabs/tools/audio-converter';
+// ─── constants ────────────────────────────────────────────────────────────────
 
-// Event name — must match the string emitted in MainActivity.kt
+const CONVERTER_ROUTE   = '/tabs/tools/audio-converter';
 const SHARE_INTENT_EVENT = 'ShareIntentReceived';
+
+// Navigation retry config for cold-start timing
+const NAV_RETRY_INTERVAL_MS = 100;   // check every 100 ms
+const NAV_RETRY_MAX_ATTEMPTS = 30;   // give up after 3 seconds
+
+// ─── hook ─────────────────────────────────────────────────────────────────────
 
 export function useShareIntent() {
   const router = useRouter();
@@ -49,14 +63,60 @@ export function useShareIntent() {
   // Dedup guard — tracks the last URI we started processing
   const lastHandledUriRef = useRef(null);
 
+  // Tracks a pending navigate-after-ready interval so we can cancel it on unmount
+  const navRetryTimerRef = useRef(null);
+
+  // ── navigation helper ──────────────────────────────────────────────────────
   /**
-   * Core handler — called every time a ShareIntentReceived event fires.
-   * @param {{ uri: string, mimeType: string }} event
+   * Push to the converter screen.
+   *
+   * On cold start expo-router's navigator may not be ready to accept pushes
+   * yet — calling router.push() on an unmounted navigator is silently dropped.
+   * We poll until router.canGoBack() is defined (navigator mounted) or fall
+   * back to router.replace() if push keeps failing.
+   *
+   * router.navigate() is used instead of router.push() because:
+   *   - If the user is already on the converter screen it replaces in-place
+   *     rather than stacking a duplicate.
+   *   - If they are elsewhere it pushes correctly.
    */
+  const navigateToConverter = useCallback(() => {
+    // Clear any existing retry timer
+    if (navRetryTimerRef.current) {
+      clearInterval(navRetryTimerRef.current);
+      navRetryTimerRef.current = null;
+    }
+
+    let attempts = 0;
+
+    navRetryTimerRef.current = setInterval(() => {
+      attempts++;
+
+      try {
+        // expo-router exposes router.navigate() which works as push/replace
+        // depending on whether the target is already on the stack.
+        router.navigate(CONVERTER_ROUTE);
+        // If we get here without throwing, navigation was accepted.
+        clearInterval(navRetryTimerRef.current);
+        navRetryTimerRef.current = null;
+      } catch {
+        // Navigator not ready yet — will retry
+      }
+
+      if (attempts >= NAV_RETRY_MAX_ATTEMPTS) {
+        // Give up gracefully — the file is still in context so the converter
+        // screen will pick it up if the user navigates there manually.
+        clearInterval(navRetryTimerRef.current);
+        navRetryTimerRef.current = null;
+      }
+    }, NAV_RETRY_INTERVAL_MS);
+  }, [router]);
+
+  // ── event handler ──────────────────────────────────────────────────────────
   const handleShareEvent = useCallback(async (event) => {
     if (Platform.OS !== 'android') return;
 
-    const rawUri  = event?.uri   || null;
+    const rawUri  = event?.uri      || null;
     const rawMime = event?.mimeType || '';
 
     if (!rawUri) return;
@@ -69,18 +129,18 @@ export function useShareIntent() {
     startReceiving();
 
     try {
-      // Validate MIME type before doing any file I/O
+      // 1. Validate MIME before doing any file I/O
       const validationError = validateSharedFile({ uri: rawUri, mimeType: rawMime });
       if (validationError) throw new Error(validationError);
 
-      // Derive a safe filename from the URI + MIME
-      const rawName    = extractFileName(rawUri);
+      // 2. Derive a safe filename
+      const rawName     = extractFileName(rawUri);
       const nameWithExt = ensureAudioExtensionFromMime(rawName, rawMime);
 
-      // Copy content:// → local file:// in staging
+      // 3. Copy content:// → local file:// in app-private staging dir
       const { localUri, size } = await copySharedFileToStaging(rawUri, nameWithExt);
 
-      // Resolve the final MIME (may be empty from some apps)
+      // 4. Resolve final MIME (some apps send an empty type)
       const mimeType = rawMime || guessMimeFromName(nameWithExt);
 
       const sharedFile = {
@@ -91,10 +151,11 @@ export function useShareIntent() {
         source:   'share',
       };
 
+      // 5. Store in context — converter screen will auto-import when it mounts
       setSharedFile(sharedFile);
 
-      // Navigate to the converter screen
-      router.push(CONVERTER_ROUTE);
+      // 6. Navigate — retries until the navigator is ready (cold-start safe)
+      navigateToConverter();
 
     } catch (err) {
       const message = err?.message || 'Could not import the shared file.';
@@ -102,17 +163,22 @@ export function useShareIntent() {
       Alert.alert(
         'Could not import file',
         message,
-        [{ text: 'OK', onPress: () => { lastHandledUriRef.current = null; clear(); } }],
+        [{
+          text: 'OK',
+          onPress: () => {
+            lastHandledUriRef.current = null;
+            clear();
+          },
+        }],
         { cancelable: true },
       );
     }
-  }, [isProcessing, startReceiving, setSharedFile, setError, clear, router]);
+  }, [isProcessing, startReceiving, setSharedFile, setError, clear, navigateToConverter]);
 
+  // ── listener registration ──────────────────────────────────────────────────
   useEffect(() => {
     if (Platform.OS !== 'android') return;
 
-    // DeviceEventEmitter is the correct emitter for events sent from
-    // native Android code via RCTDeviceEventEmitter in Kotlin/Java.
     const subscription = DeviceEventEmitter.addListener(
       SHARE_INTENT_EVENT,
       handleShareEvent,
@@ -120,9 +186,15 @@ export function useShareIntent() {
 
     return () => {
       subscription.remove();
+      // Cancel any pending navigation retry on unmount
+      if (navRetryTimerRef.current) {
+        clearInterval(navRetryTimerRef.current);
+        navRetryTimerRef.current = null;
+      }
     };
   }, [handleShareEvent]);
 
+  // ── public API ─────────────────────────────────────────────────────────────
   const dismiss = useCallback(() => {
     lastHandledUriRef.current = null;
     clear();

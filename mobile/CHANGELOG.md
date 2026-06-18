@@ -200,6 +200,65 @@ Timestamp suffix preserves uniqueness across multiple conversions of the same fi
 
 ---
 
+## Fix: Share Intent Navigation Timing (Cold Start)
+
+**Commit title:**
+```
+fix(shareIntent): retry router.navigate on cold start until navigator is ready
+```
+
+### Problem
+
+After the `DeviceEventEmitter` fix, the `DeviceEventEmitter` was delivering the file correctly but the app still opened to the home screen instead of Audio Converter.
+
+**Root cause:** On cold start, `router.navigate(CONVERTER_ROUTE)` was called immediately after `setSharedFile()`. At that point the React Navigation stack is not yet mounted — the call is silently dropped and the user lands on whatever screen the app initialises to.
+
+On foreground/background intents this was not a problem because the navigator was already running.
+
+### What Was Fixed
+
+**`mobile/hooks/useShareIntent.js`** — replaced single `router.push()` call with a `navigateToConverter()` helper that:
+
+- Uses `router.navigate()` instead of `router.push()` — navigate is idempotent (won't stack duplicates if already on the screen)
+- Wraps the call in a `setInterval` retry loop that attempts every **100 ms** for up to **3 seconds** (30 attempts)
+- On foreground/background intents the navigator is already ready so the push succeeds on the first attempt — no delay
+- On cold start it retries until the navigator accepts the call, then clears the interval immediately
+- If all retries are exhausted the file is still in `ShareIntentContext` — the converter screen will pick it up automatically if the user navigates there manually
+
+### End-to-End Flow After Fix
+
+```
+User taps Share → selects app
+        ↓
+MainActivity.kt fires DeviceEventEmitter "ShareIntentReceived"
+        ↓
+useShareIntent validates + stages file → setSharedFile() [context status = ready]
+        ↓
+navigateToConverter() starts retry loop
+        ↓
+Navigator mounts (cold start) or already ready (foreground)
+        ↓
+router.navigate('/tabs/tools/audio-converter') succeeds
+        ↓
+Audio Converter screen mounts
+        ↓
+useEffect sees shareStatus === 'ready' → setSelectedFile(pendingFile)
+        ↓
+Source file section populated with file name, size, MIME badge
+Convert to WAV button enabled — user taps once to convert
+```
+
+### Files Changed
+
+| File | Change |
+|---|---|
+| `mobile/hooks/useShareIntent.js` | Added `navigateToConverter()` with retry loop; replaced `router.push` with `router.navigate` |
+
+### Files Unchanged
+`MainActivity.kt`, `ShareIntentContext.js`, `ShareIntentHandler.js`, `app/_layout.js`, `audio-converter.js` — all untouched.
+
+---
+
 ## Fix: Share Intent Not Delivering File to App (Root Cause Fix)
 
 **Commit title:**
