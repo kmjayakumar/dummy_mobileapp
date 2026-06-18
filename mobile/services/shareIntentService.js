@@ -49,22 +49,26 @@ function safeDecode(str) {
  *   content://com.android.providers.media.documents/document/audio%3A1234
  *   file:///storage/emulated/0/Download/voice.opus
  *   content://media/external/audio/media/1234
+ *
+ * Exported so useShareIntent.js can call it directly with the raw native URI.
  */
-function extractNameFromUri(uri) {
+export function extractFileName(uri) {
   try {
-    // Try the last path segment
     const decoded = safeDecode(uri);
     const segments = decoded.split(/[\/\\]/);
     const last = segments[segments.length - 1];
-    // "audio:1234" → not useful; try the one before
     if (last && !last.includes(':') && last.includes('.')) {
       return last;
     }
-    // Generic fallback
     return 'shared_audio';
   } catch {
     return 'shared_audio';
   }
+}
+
+// Keep the old internal name pointing to the same function for any internal callers.
+function extractNameFromUri(uri) {
+  return extractFileName(uri);
 }
 
 /** Guess a MIME type from a file extension when the OS did not supply one. */
@@ -82,7 +86,15 @@ function guessMimeFromExtension(fileName) {
   return map[ext] || null;
 }
 
-/** Ensure the name has an appropriate audio extension. */
+/**
+ * Ensure the name has an appropriate audio extension.
+ * Exported as ensureAudioExtensionFromMime for use by useShareIntent.js.
+ */
+export function ensureAudioExtensionFromMime(name, mimeType) {
+  return ensureAudioExtension(name, mimeType);
+}
+
+/** Internal alias — keeps existing internal callers working. */
 function ensureAudioExtension(name, mimeType) {
   const mimeExtMap = {
     'audio/opus':  '.opus',

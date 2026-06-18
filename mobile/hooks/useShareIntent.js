@@ -1,31 +1,38 @@
 /**
  * useShareIntent.js
  *
- * Orchestrates the full Android Share Intent flow:
+ * Listens for the "ShareIntentReceived" event emitted by MainActivity.kt
+ * whenever the user shares an audio file into the app.
  *
- *   1. Reads expo-router search params on every render (covers cold-start,
- *      already-running, and background-wake scenarios).
- *   2. Detects a new share intent by comparing the raw URI.
- *   3. Calls shareIntentService.receiveSharedFile() to validate + stage the file.
- *   4. Writes the result into ShareIntentContext.
- *   5. Navigates to the converter screen once the file is ready.
+ * Covers all three lifecycle cases:
+ *   - Cold start   : MainActivity.onCreate  → emits after bridge is ready
+ *   - Foreground   : MainActivity.onNewIntent → emits immediately
+ *   - Background   : same as foreground (singleTask launch mode)
  *
- * Usage (in the root layout or a top-level screen):
- *
- *   const { status, error, dismiss } = useShareIntent();
+ * The hook is mounted once at the root layout via ShareIntentHandler.
+ * All state is stored in ShareIntentContext so any screen can read it.
  */
 
 import { useEffect, useRef, useCallback } from 'react';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
+import { DeviceEventEmitter } from 'react-native';
+import { useRouter } from 'expo-router';
 import { Alert } from 'react-native';
-import { receiveSharedFile, parseIntentParams } from '../services/shareIntentService';
 import { useShareIntentContext } from '../context/ShareIntentContext';
+import {
+  validateSharedFile,
+  copySharedFileToStaging,
+  ensureAudioExtensionFromMime,
+  extractFileName,
+} from '../services/shareIntentService';
 
 // Route to navigate to when a valid shared file arrives.
 const CONVERTER_ROUTE = '/tabs/tools/audio-converter';
 
+// Event name — must match the string emitted in MainActivity.kt
+const SHARE_INTENT_EVENT = 'ShareIntentReceived';
+
 export function useShareIntent() {
-  const params = useLocalSearchParams();
   const router = useRouter();
   const {
     status,
@@ -39,62 +46,103 @@ export function useShareIntent() {
     isProcessing,
   } = useShareIntentContext();
 
-  // Track the last URI we processed so we don't handle the same intent twice
-  // (expo-router keeps params in the URL while the screen is mounted).
+  // Dedup guard — tracks the last URI we started processing
   const lastHandledUriRef = useRef(null);
 
-  const handleIncomingIntent = useCallback(async () => {
-    // Parse params early to check if there's anything to handle
-    const parsed = parseIntentParams(params);
-    if (!parsed?.uri) return;
+  /**
+   * Core handler — called every time a ShareIntentReceived event fires.
+   * @param {{ uri: string, mimeType: string }} event
+   */
+  const handleShareEvent = useCallback(async (event) => {
+    if (Platform.OS !== 'android') return;
 
-    const uri = parsed.uri;
+    const rawUri  = event?.uri   || null;
+    const rawMime = event?.mimeType || '';
 
-    // Duplicate guard — same URI already handled
-    if (lastHandledUriRef.current === uri) return;
+    if (!rawUri) return;
 
-    // Another share is already in flight
+    // Dedup: same URI already in flight or already processed
+    if (lastHandledUriRef.current === rawUri) return;
     if (isProcessing()) return;
 
-    // Mark as handling
-    lastHandledUriRef.current = uri;
+    lastHandledUriRef.current = rawUri;
     startReceiving();
 
     try {
-      const sharedFile = await receiveSharedFile(params);
+      // Validate MIME type before doing any file I/O
+      const validationError = validateSharedFile({ uri: rawUri, mimeType: rawMime });
+      if (validationError) throw new Error(validationError);
+
+      // Derive a safe filename from the URI + MIME
+      const rawName    = extractFileName(rawUri);
+      const nameWithExt = ensureAudioExtensionFromMime(rawName, rawMime);
+
+      // Copy content:// → local file:// in staging
+      const { localUri, size } = await copySharedFileToStaging(rawUri, nameWithExt);
+
+      // Resolve the final MIME (may be empty from some apps)
+      const mimeType = rawMime || guessMimeFromName(nameWithExt);
+
+      const sharedFile = {
+        uri:      localUri,
+        name:     nameWithExt,
+        mimeType: mimeType || 'application/octet-stream',
+        size,
+        source:   'share',
+      };
+
       setSharedFile(sharedFile);
 
-      // Navigate to converter. Use replace if already on the converter screen,
-      // push otherwise so the user can navigate back.
+      // Navigate to the converter screen
       router.push(CONVERTER_ROUTE);
+
     } catch (err) {
       const message = err?.message || 'Could not import the shared file.';
       setError(message);
-
       Alert.alert(
         'Could not import file',
         message,
-        [{ text: 'OK', onPress: clear }],
-        { cancelable: true }
+        [{ text: 'OK', onPress: () => { lastHandledUriRef.current = null; clear(); } }],
+        { cancelable: true },
       );
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params]);
+  }, [isProcessing, startReceiving, setSharedFile, setError, clear, router]);
 
   useEffect(() => {
-    handleIncomingIntent();
-  }, [handleIncomingIntent]);
+    if (Platform.OS !== 'android') return;
+
+    // DeviceEventEmitter is the correct emitter for events sent from
+    // native Android code via RCTDeviceEventEmitter in Kotlin/Java.
+    const subscription = DeviceEventEmitter.addListener(
+      SHARE_INTENT_EVENT,
+      handleShareEvent,
+    );
+
+    return () => {
+      subscription.remove();
+    };
+  }, [handleShareEvent]);
 
   const dismiss = useCallback(() => {
     lastHandledUriRef.current = null;
     clear();
   }, [clear]);
 
-  return {
-    status,
-    error,
-    hasFile,
-    pendingFile,
-    dismiss,
+  return { status, error, hasFile, pendingFile, dismiss };
+}
+
+// ─── local helper ─────────────────────────────────────────────────────────────
+
+function guessMimeFromName(fileName) {
+  const ext = (fileName || '').toLowerCase().split('.').pop();
+  const map = {
+    opus: 'audio/opus',
+    ogg:  'audio/ogg',
+    aac:  'audio/aac',
+    mp3:  'audio/mpeg',
+    mp4:  'audio/mp4',
+    m4a:  'audio/mp4',
+    wav:  'audio/wav',
   };
+  return map[ext] || null;
 }

@@ -198,6 +198,69 @@ Timestamp suffix preserves uniqueness across multiple conversions of the same fi
 
 ---
 
+---
+
+## Fix: Share Intent Not Delivering File to App (Root Cause Fix)
+
+**Commit title:**
+```
+fix(android): read EXTRA_STREAM via native DeviceEventEmitter, replace broken useLocalSearchParams approach
+```
+
+### Problem
+
+The app appeared correctly in the Android share sheet (intent filters were registered and working), but tapping the app did nothing — the converter screen opened empty with no file selected.
+
+**Root cause:** `useLocalSearchParams()` in expo-router only contains URL query parameters from deep links. When Android delivers a share intent (`ACTION_SEND`), the file URI is placed in the native intent extra `Intent.EXTRA_STREAM` — a raw Android API that expo-router never parses or exposes to JS. The hook was looking for `params['android.intent.extra.STREAM']` in the URL, which is always empty on a share intent. The entire detection pipeline silently returned `null` on every share.
+
+### What Was Fixed
+
+#### `android/app/src/main/java/com/yourcompany/audioconverter/MainActivity.kt`
+- Added `onCreate` override — calls `handleShareIntent(intent)` on cold start
+- Added `onNewIntent` override — calls `handleShareIntent(intent)` when app is already running (foreground or background wake)
+- `handleShareIntent` reads `Intent.EXTRA_STREAM` (for `ACTION_SEND`) or `intent.data` (for `ACTION_VIEW`) from the native Android intent
+- Emits a `"ShareIntentReceived"` event to JS via `DeviceEventEmitter` with payload `{ uri, mimeType }`
+- Cold-start safe: if the React bridge is not yet ready, queues the emit via `addReactInstanceEventListener` so the event fires as soon as JS is loaded
+- Handles Android 13+ `getParcelableExtra` API change with a version-guarded call
+
+#### `mobile/hooks/useShareIntent.js`
+- Replaced `useLocalSearchParams()` + `parseIntentParams()` approach entirely
+- Now uses `DeviceEventEmitter.addListener("ShareIntentReceived", handler)` — the correct JS API for events emitted from native Android Kotlin code
+- Handler validates MIME, extracts filename, copies file to staging, updates context, navigates to converter
+- All existing dedup logic (`lastHandledUriRef`) and error handling preserved
+- Subscription is cleaned up on unmount via `subscription.remove()`
+
+#### `mobile/services/shareIntentService.js`
+- Exported `extractFileName(uri)` — previously private, now accessible to the hook directly
+- Exported `ensureAudioExtensionFromMime(name, mimeType)` — thin wrapper over existing internal function
+- No behaviour changes to existing functions
+
+### Why This Approach
+
+`DeviceEventEmitter` is the standard React Native bridge for native-to-JS events. Using it directly in `MainActivity.kt` requires zero additional dependencies, is fully compatible with Expo SDK 51 / RN 0.74, survives `expo prebuild`, and gives complete control over all three lifecycle cases (cold start, foreground, background). Third-party libraries like `react-native-receive-sharing-intent` wrap this same mechanism but add maintenance risk and version-compatibility uncertainty.
+
+### Files Changed
+
+| File | Type | Change |
+|---|---|---|
+| `android/…/MainActivity.kt` | Native (Kotlin) | Added intent reading + DeviceEventEmitter emit |
+| `mobile/hooks/useShareIntent.js` | JS | Replaced useLocalSearchParams with DeviceEventEmitter listener |
+| `mobile/services/shareIntentService.js` | JS | Exported extractFileName + ensureAudioExtensionFromMime |
+
+### Files Unchanged
+All other files — `ShareIntentContext.js`, `ShareIntentHandler.js`, `app/_layout.js`, `audio-converter.js`, `audioConverterService.js`, `AndroidManifest.xml`, `app.json` — are untouched.
+
+### Rebuild Required
+`MainActivity.kt` is a native file. A full rebuild is required:
+```bash
+# From mobile/
+expo run:android
+# or
+eas build --platform android --profile development
+```
+
+---
+
 ## Architecture Notes
 
 - FFmpeg runs server-side; the mobile client uploads the source file and downloads the result. No on-device FFmpeg.
