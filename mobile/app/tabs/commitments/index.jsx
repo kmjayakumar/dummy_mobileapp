@@ -9,7 +9,7 @@ import {
   RefreshControl,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useCommitments } from '../../context/CommitmentContext';
+import { useCommitments } from '../../../context/CommitmentContext';
 
 const today = () => new Date().toISOString().split('T')[0];
 
