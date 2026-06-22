@@ -33,50 +33,6 @@
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_AUDIO",
         "android.permission.WRITE_EXTERNAL_STORAGE"
-      ],
-      "intentFilters": [
-        {
-          "action": "android.intent.action.SEND",
-          "category": ["android.intent.category.DEFAULT"],
-          "data": [{ "mimeType": "audio/*" }]
-        },
-        {
-          "action": "android.intent.action.SEND",
-          "category": ["android.intent.category.DEFAULT"],
-          "data": [{ "mimeType": "application/octet-stream" }]
-        },
-        {
-          "action": "android.intent.action.VIEW",
-          "category": [
-            "android.intent.category.DEFAULT"
-          ],
-          "data": [{ "mimeType": "audio/*" }]
-        },
-        {
-          "action": "android.intent.action.VIEW",
-          "category": ["android.intent.category.DEFAULT"],
-          "data": [{ "mimeType": "audio/opus" }]
-        },
-        {
-          "action": "android.intent.action.VIEW",
-          "category": ["android.intent.category.DEFAULT"],
-          "data": [{ "mimeType": "audio/ogg" }]
-        },
-        {
-          "action": "android.intent.action.VIEW",
-          "category": ["android.intent.category.DEFAULT"],
-          "data": [{ "mimeType": "audio/aac" }]
-        },
-        {
-          "action": "android.intent.action.VIEW",
-          "category": ["android.intent.category.DEFAULT"],
-          "data": [{ "mimeType": "audio/mpeg" }]
-        },
-        {
-          "action": "android.intent.action.VIEW",
-          "category": ["android.intent.category.DEFAULT"],
-          "data": [{ "mimeType": "audio/mp4" }]
-        }
       ]
     },
     "web": {

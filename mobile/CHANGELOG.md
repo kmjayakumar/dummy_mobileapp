@@ -484,3 +484,69 @@ adb logcat | findstr ShareIntent
 # JS (Metro console)
 Filter by: [ShareIntent]
 ```
+
+---
+
+## Fix: EAS Build Strips Share Intent Native Code (Production Build Broken)
+
+**Commit title:**
+```
+fix(plugin): make share intent EAS-safe by patching MainActivity and MainApplication via config plugin
+```
+
+### Problem
+
+Share intent worked on local builds (`expo run:android`) but was completely broken on EAS builds. Tapping the app in the share sheet opened the app but nothing happened — no file, no navigation to the converter.
+
+**Root cause:** EAS Build runs `expo prebuild --clean` before compiling, which regenerates `MainActivity.kt` and `MainApplication.kt` from Expo's default templates. This overwrote all handwritten share intent code:
+
+| File | What EAS did |
+|---|---|
+| `MainActivity.kt` | Regenerated — `handleShareIntent`, `onNewIntent`, `emitShareIntent` all gone |
+| `MainApplication.kt` | Regenerated — `ShareIntentPackage()` registration gone |
+| `ShareIntentModule.kt` | Survived (not a regenerated file) |
+| `ShareIntentPackage.kt` | Survived (not a regenerated file) |
+
+Result: intent filters in the manifest (app appeared in share sheet) ✅ but no code reading `EXTRA_STREAM` or emitting to JS ❌.
+
+### Fix
+
+**`plugins/withShareIntentAndroid.js`** — completely rewritten using the correct `@expo/config-plugins` APIs:
+
+| Part | API | What it does |
+|---|---|---|
+| 1 | `withAndroidManifest` | Injects `ACTION_SEND` + `ACTION_VIEW` intent filters + `READ_MEDIA_AUDIO` permission |
+| 2 | `withMainActivity` | Replaces `MainActivity.kt` contents with full share intent implementation |
+| 3 | `withMainApplication` | Replaces `MainApplication.kt` contents with `ShareIntentPackage()` registered |
+| 4 | `withMainActivity` (timing hook) | Writes `ShareIntentModule.kt` and `ShareIntentPackage.kt` if missing in a fresh clone |
+
+All four parts are **idempotent** — sentinel string checks prevent double-patching on repeated prebuild runs.
+
+**`app.json`** — removed `intentFilters` array. It was being processed by both Expo's built-in handler AND the plugin simultaneously, producing broken duplicate entries with doubled namespace prefixes (`android.intent.action.android.intent.action.SEND`). The plugin is now the single source of truth for all intent filters.
+
+### Result
+
+`expo prebuild` and EAS Build now write the same `MainActivity.kt`, `MainApplication.kt`, `ShareIntentModule.kt`, `ShareIntentPackage.kt`, and `AndroidManifest.xml` as the local hand-edited versions. Both local and EAS builds behave identically.
+
+### Files Changed
+
+| File | Change |
+|---|---|
+| `plugins/withShareIntentAndroid.js` | Rewritten — uses `withMainActivity` + `withMainApplication` instead of fragile `fs` write via `withAppBuildGradle` |
+| `app.json` | Removed `android.intentFilters` array — plugin is now sole owner of intent filters |
+
+### Verification
+
+```
+expo prebuild --platform android --no-install
+```
+
+After prebuild, all checks pass:
+- `MainActivity.kt` contains `handleShareIntent` ✅
+- `MainActivity.kt` stores `ShareIntentModule.pendingUri` ✅
+- `MainApplication.kt` registers `ShareIntentPackage()` ✅
+- `ShareIntentModule.kt` exists ✅
+- `ShareIntentPackage.kt` exists ✅
+- `AndroidManifest.xml` contains `android.intent.action.SEND` ✅
+- No doubled-prefix duplicates in manifest ✅
+- Gradle build: `BUILD SUCCESSFUL` ✅
