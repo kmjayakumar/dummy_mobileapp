@@ -49,10 +49,7 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="commitments"
         options={{
-          title: 'Commitments',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="shield-checkmark-outline" size={size} color={color} />
-          ),
+          href: null, // hidden from tab bar — re-enable when commitments feature is ready
         }}
       />
       <Tabs.Screen
