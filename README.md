@@ -1,3 +1,9 @@
+to start and open mobile app:
+
+npx expo run:android
+npx expo start --dev-client
+
+
 # 🚀 Full-Stack Mobile App Starter
 
 A production-ready monorepo starter with:
