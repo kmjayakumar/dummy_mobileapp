@@ -47,6 +47,15 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="timeguardian"
+        options={{
+          title: 'Guardian',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="shield-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="commitments"
         options={{
           href: null, // hidden from tab bar — re-enable when commitments feature is ready
@@ -73,4 +82,3 @@ export default function TabsLayout() {
     </Tabs>
   );
 }
-// test
