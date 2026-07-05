@@ -8,3 +8,8 @@ build/
 web-build/
 android/
 ios/
+mobile/app/tabs/timeguardian/index old.jsx
+mobile/app/tabs/timeguardian/settings old.jsx
+mobile/context/TimeGuardianContext old.js
+mobile/timeguardian/logic/dayBlocks old.js
+mobile/timeguardian/storage/repository old.js
