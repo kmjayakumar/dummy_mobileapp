@@ -1,52 +1,88 @@
 /**
  * repository.js
  * Local-first storage using AsyncStorage.
- * All reads/writes for the 4 Time Guardian entities live here.
- * Logic and UI never touch AsyncStorage directly — always go through this file.
+ * All reads/writes for Time Guardian entities live here.
+ * Logic and UI never touch AsyncStorage directly.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Namespaced keys — won't collide with any other module
 const KEYS = {
-  ROTATION_ANCHOR : 'tg:rotationAnchor',
-  CUSTOM_BLOCKS   : 'tg:customBlocks',
-  LOG_ENTRIES     : 'tg:logEntries',
-  ENERGY_ENTRIES  : 'tg:energyEntries',
+  ROTATION_ANCHOR   : 'tg:rotationAnchor',
+  CUSTOM_BLOCKS     : 'tg:customBlocks',
+  LOG_ENTRIES       : 'tg:logEntries',
+  ENERGY_ENTRIES    : 'tg:energyEntries',
+  WORK_HOURS        : 'tg:workHours',
+  ROTATION_SCHEDULE : 'tg:rotationSchedule',
 };
 
-// ─── Seed data (first launch only) ───────────────────────────────────────────
+// ─── Seed defaults ────────────────────────────────────────────────────────────
 
 const DEFAULT_CUSTOM_BLOCKS = [
   {
     id: 'tg_default_1',
     label: 'Health check-in / exercise',
-    category: 'self',
-    type: 'protected',
-    days: [1, 3, 5],
-    start: '07:00',
-    end: '07:45',
-    active: true,
+    category: 'self', type: 'protected',
+    days: [1, 3, 5], start: '07:00', end: '07:45', active: true,
   },
   {
     id: 'tg_default_2',
     label: 'Reading / course work',
-    category: 'self',
-    type: 'soft',
-    days: [2, 4],
-    start: '20:30',
-    end: '21:15',
-    active: true,
+    category: 'self', type: 'soft',
+    days: [2, 4], start: '20:30', end: '21:15', active: true,
   },
   {
     id: 'tg_default_3',
     label: 'Finance and digital tidy-up',
-    category: 'self',
-    type: 'soft',
-    days: [6],
-    start: '08:00',
-    end: '08:45',
-    active: true,
+    category: 'self', type: 'soft',
+    days: [6], start: '08:00', end: '08:45', active: true,
+  },
+];
+
+// Default work hours — matches the original hardcoded values in dayBlocks.js
+export const DEFAULT_WORK_HOURS = {
+  workStart   : '10:00',
+  workEnd     : '19:00',
+  overtimeEnd : '23:00',
+};
+
+// Default rotation schedule — matches the original hardcoded values in rotation.js
+export const DEFAULT_ROTATION_SCHEDULE = [
+  {
+    index     : 0,
+    sundayLabel   : "Mother's home visit",
+    sundayStart   : '09:00',
+    sundayEnd     : '18:00',
+    sundayCategory: 'family',
+    hasSaturday   : false,
+  },
+  {
+    index     : 1,
+    sundayLabel   : 'Wife outing',
+    sundayStart   : '09:00',
+    sundayEnd     : '18:00',
+    sundayCategory: 'family',
+    hasSaturday   : false,
+  },
+  {
+    index     : 2,
+    sundayLabel   : 'Rest / friends time',
+    sundayStart   : '09:00',
+    sundayEnd     : '18:00',
+    sundayCategory: 'self',
+    hasSaturday   : false,
+  },
+  {
+    index          : 3,
+    sundayLabel    : 'Karmayoga field service',
+    sundayStart    : '08:00',
+    sundayEnd      : '18:00',
+    sundayCategory : 'karmayoga',
+    hasSaturday    : true,
+    saturdayLabel  : 'Karmayoga field service',
+    saturdayStart  : '08:00',
+    saturdayEnd    : '18:00',
+    saturdayCategory: 'karmayoga',
   },
 ];
 
@@ -64,6 +100,44 @@ export async function setRotationAnchor(anchorDate) {
     await AsyncStorage.setItem(KEYS.ROTATION_ANCHOR, JSON.stringify({ anchor_date: anchorDate }));
     return true;
   } catch { return false; }
+}
+
+// ─── Work Hours ───────────────────────────────────────────────────────────────
+
+export async function getWorkHours() {
+  try {
+    const v = await AsyncStorage.getItem(KEYS.WORK_HOURS);
+    return v ? JSON.parse(v) : DEFAULT_WORK_HOURS;
+  } catch { return DEFAULT_WORK_HOURS; }
+}
+
+export async function saveWorkHours(workHours) {
+  try {
+    await AsyncStorage.setItem(KEYS.WORK_HOURS, JSON.stringify(workHours));
+    return true;
+  } catch { return false; }
+}
+
+// ─── Rotation Schedule ────────────────────────────────────────────────────────
+
+export async function getRotationSchedule() {
+  try {
+    const v = await AsyncStorage.getItem(KEYS.ROTATION_SCHEDULE);
+    return v ? JSON.parse(v) : DEFAULT_ROTATION_SCHEDULE;
+  } catch { return DEFAULT_ROTATION_SCHEDULE; }
+}
+
+export async function saveRotationSchedule(schedule) {
+  try {
+    await AsyncStorage.setItem(KEYS.ROTATION_SCHEDULE, JSON.stringify(schedule));
+    return true;
+  } catch { return false; }
+}
+
+export async function updateRotationSlot(index, changes) {
+  const schedule = await getRotationSchedule();
+  const updated  = schedule.map((slot) => (slot.index === index ? { ...slot, ...changes } : slot));
+  return saveRotationSchedule(updated);
 }
 
 // ─── CustomBlocks ─────────────────────────────────────────────────────────────
@@ -98,8 +172,7 @@ export async function updateCustomBlock(id, changes) {
 
 export async function deleteCustomBlock(id) {
   const blocks  = await getCustomBlocks();
-  const updated = blocks.filter((b) => b.id !== id);
-  return saveCustomBlocks(updated);
+  return saveCustomBlocks(blocks.filter((b) => b.id !== id));
 }
 
 export async function toggleCustomBlockActive(id) {
@@ -153,10 +226,6 @@ export async function upsertEnergyEntry(date, time, level, cause = null) {
   } catch { return null; }
 }
 
-/**
- * Returns one entry per day for the last N days (last check-in of day wins).
- * Used by the energy bar chart.
- */
 export async function getEnergyChartData(days = 7) {
   const entries = await getEnergyEntries();
   const byDate  = {};

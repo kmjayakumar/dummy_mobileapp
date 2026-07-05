@@ -1,6 +1,11 @@
 /**
  * app/tabs/timeguardian/index.jsx
- * Home — week view, energy check-in, check-request modal, exception modal.
+ * Home — week view with navigation, energy check-in, check-request modal, exception modal.
+ *
+ * Fixes:
+ * 1. Week navigation — prev/next week arrows
+ * 2. Date info visible on every day card
+ * 3. CTA bar uses useSafeAreaInsets so it never overlaps the tab bar
  */
 
 import React, { useState, useMemo } from 'react';
@@ -9,31 +14,56 @@ import {
   Modal, TextInput, Alert, ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTimeGuardian } from '../../../context/TimeGuardianContext';
-import { getBlocksForDate, getCurrentWeekDates, todayStr, nowTimeStr } from '../../../timeguardian/logic/dayBlocks';
+import { getBlocksForDate, todayStr, nowTimeStr } from '../../../timeguardian/logic/dayBlocks';
 import { findConflict, DURATION_PRESETS, WHOLE_DAY_START, WHOLE_DAY_END, computeEndTime } from '../../../timeguardian/logic/conflict';
 import {
   TGColors, TGCategoryColors, TGEnergyColors, TGEnergyLabels, DAY_LABELS_FULL,
 } from '../../../timeguardian/theme/tokens';
 
+// ─── Week helpers ─────────────────────────────────────────────────────────────
+
+/** Returns the Sunday of the week containing the given Date object */
+function getSundayOf(date) {
+  const d = new Date(date);
+  d.setDate(d.getDate() - d.getDay());
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+/** Returns 7 YYYY-MM-DD strings for the week starting at sundayDate */
+function getWeekDates(sundayDate) {
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(sundayDate);
+    d.setDate(sundayDate.getDate() + i);
+    return d.toISOString().split('T')[0];
+  });
+}
+
+/** Formats a Sunday date as "Jun 29 – Jul 5" style range label */
+function weekRangeLabel(sundayDate) {
+  const saturday = new Date(sundayDate);
+  saturday.setDate(sundayDate.getDate() + 6);
+  const fmt = (d) => d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  return `${fmt(sundayDate)} – ${fmt(saturday)}`;
+}
+
 // ─── First-launch anchor prompt ───────────────────────────────────────────────
 
 function AnchorPrompt({ onSave }) {
   const [date, setDate] = useState('');
-
   const handleSave = () => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       Alert.alert('Invalid format', 'Enter a date as YYYY-MM-DD.');
       return;
     }
-    const d = new Date(date + 'T00:00:00');
-    if (d.getDay() !== 0) {
+    if (new Date(date + 'T00:00:00').getDay() !== 0) {
       Alert.alert('Not a Sunday', 'The anchor date must be a Sunday.');
       return;
     }
     onSave(date);
   };
-
   return (
     <View style={styles.anchorWrap}>
       <Text style={styles.anchorTitle}>Welcome to Time Guardian</Text>
@@ -41,13 +71,8 @@ function AnchorPrompt({ onSave }) {
         To set up your 4-week rotation, enter a Sunday when you visited your mother's home.
         You only need to do this once.
       </Text>
-      <TextInput
-        style={styles.input}
-        placeholder="YYYY-MM-DD  (a Sunday)"
-        placeholderTextColor={TGColors.muted}
-        value={date}
-        onChangeText={setDate}
-      />
+      <TextInput style={styles.input} placeholder="YYYY-MM-DD  (a Sunday)"
+        placeholderTextColor={TGColors.muted} value={date} onChangeText={setDate} />
       <TouchableOpacity style={styles.goldBtn} onPress={handleSave}>
         <Text style={styles.goldBtnText}>Set anchor & begin</Text>
       </TouchableOpacity>
@@ -60,12 +85,10 @@ function AnchorPrompt({ onSave }) {
 function EnergyCheckIn({ todayEnergy, onCheckIn }) {
   const [pendingLevel, setPendingLevel] = useState(null);
   const causes = ['Work', 'Family', 'Karmayoga', 'Health', 'Other'];
-
   const handleLevel = (level) => {
     setPendingLevel(level);
     if (level >= 3) { onCheckIn(level, null); setPendingLevel(null); }
   };
-
   return (
     <View style={styles.energyCard}>
       <Text style={styles.energyHeading}>
@@ -78,11 +101,9 @@ function EnergyCheckIn({ todayEnergy, onCheckIn }) {
       </Text>
       <View style={styles.chipRow}>
         {[1, 2, 3, 4, 5].map((l) => (
-          <TouchableOpacity
-            key={l}
+          <TouchableOpacity key={l}
             style={[styles.energyBtn, { borderColor: TGEnergyColors[l] }]}
-            onPress={() => handleLevel(l)}
-          >
+            onPress={() => handleLevel(l)}>
             <Text style={[styles.energyBtnText, { color: TGEnergyColors[l] }]}>
               {TGEnergyLabels[l]}
             </Text>
@@ -94,11 +115,8 @@ function EnergyCheckIn({ todayEnergy, onCheckIn }) {
           <Text style={styles.fieldLabel}>What's causing this?</Text>
           <View style={styles.chipRow}>
             {causes.map((c) => (
-              <TouchableOpacity
-                key={c}
-                style={styles.causeChip}
-                onPress={() => { onCheckIn(pendingLevel, c); setPendingLevel(null); }}
-              >
+              <TouchableOpacity key={c} style={styles.causeChip}
+                onPress={() => { onCheckIn(pendingLevel, c); setPendingLevel(null); }}>
                 <Text style={styles.causeChipText}>{c}</Text>
               </TouchableOpacity>
             ))}
@@ -140,15 +158,20 @@ function DaySection({ dateStr, anchorDate, customBlocks }) {
   const visible = blocks.filter((b) => b.category !== 'sleep');
   const d       = new Date(dateStr + 'T00:00:00');
 
+  // Full date display: "Monday, 30 Jun"
+  const dayName   = DAY_LABELS_FULL[d.getDay()];
+  const dateLabel = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+
   return (
     <View style={[styles.dayCard, isToday && styles.dayCardToday]}>
       <View style={styles.dayHeader}>
-        <Text style={[styles.dayName, isToday && { color: TGColors.gold }]}>
-          {DAY_LABELS_FULL[d.getDay()]}
-        </Text>
-        <Text style={styles.dayDate}>
-          {d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
-        </Text>
+        <View>
+          <Text style={[styles.dayName, isToday && { color: TGColors.gold }]}>
+            {dayName}
+            {isToday ? <Text style={styles.todayTag}>  Today</Text> : null}
+          </Text>
+          <Text style={styles.dayDate}>{dateLabel}</Text>
+        </View>
       </View>
       {visible.length === 0
         ? <Text style={styles.openText}>open — nothing claimed yet</Text>
@@ -207,22 +230,18 @@ function CheckRequestModal({ visible, onClose, anchorDate, customBlocks, onLog }
             <Text style={styles.modalClose}>✕</Text>
           </TouchableOpacity>
         </View>
-
         <ScrollView contentContainerStyle={styles.modalScroll}>
           {result === null ? (
             <>
               <Text style={styles.fieldLabel}>What's being asked?</Text>
               <TextInput style={styles.input} placeholderTextColor={TGColors.muted}
                 placeholder="Label" value={label} onChangeText={setLabel} />
-
               <Text style={styles.fieldLabel}>Date</Text>
               <TextInput style={styles.input} placeholderTextColor={TGColors.muted}
                 placeholder="YYYY-MM-DD" value={date} onChangeText={setDate} />
-
               <Text style={styles.fieldLabel}>Start time</Text>
               <TextInput style={styles.input} placeholderTextColor={TGColors.muted}
                 placeholder="HH:MM" value={start} onChangeText={setStart} />
-
               <Text style={styles.fieldLabel}>Duration</Text>
               <View style={styles.chipRow}>
                 {durations.map((d) => (
@@ -233,7 +252,6 @@ function CheckRequestModal({ visible, onClose, anchorDate, customBlocks, onLog }
                   </TouchableOpacity>
                 ))}
               </View>
-
               <TouchableOpacity style={styles.goldBtn} onPress={handleCheck}>
                 <Text style={styles.goldBtnText}>Check this slot</Text>
               </TouchableOpacity>
@@ -295,9 +313,7 @@ function ExceptionModal({ visible, onClose, onLog }) {
   const [category, setCategory] = useState(null);
   const [note,     setNote]     = useState('');
   const cats = ['rest', 'health', 'emergency', 'other'];
-
   const reset = () => { setCategory(null); setNote(''); };
-
   const handleSave = async () => {
     if (!category) { Alert.alert('Select a category'); return; }
     await onLog({
@@ -307,7 +323,6 @@ function ExceptionModal({ visible, onClose, onLog }) {
     });
     reset(); onClose();
   };
-
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <View style={styles.modal}>
@@ -349,11 +364,39 @@ function ExceptionModal({ visible, onClose, onLog }) {
 // ─── Home Screen ──────────────────────────────────────────────────────────────
 
 export default function TimeGuardianHome() {
-  const router = useRouter();
+  const router   = useRouter();
+  const insets   = useSafeAreaInsets();
   const { isLoading, anchorDate, customBlocks, todayEnergy, saveAnchorDate, logEntry, checkInEnergy } = useTimeGuardian();
+
   const [checkModal,     setCheckModal]     = useState(false);
   const [exceptionModal, setExceptionModal] = useState(false);
-  const weekDates = useMemo(() => getCurrentWeekDates(), []);
+
+  // Week navigation state — starts on current week's Sunday
+  const [weekSunday, setWeekSunday] = useState(() => getSundayOf(new Date()));
+  const weekDates = useMemo(() => getWeekDates(weekSunday), [weekSunday]);
+
+  const goToPrevWeek = () => {
+    const prev = new Date(weekSunday);
+    prev.setDate(weekSunday.getDate() - 7);
+    setWeekSunday(prev);
+  };
+
+  const goToNextWeek = () => {
+    const next = new Date(weekSunday);
+    next.setDate(weekSunday.getDate() + 7);
+    setWeekSunday(next);
+  };
+
+  const goToThisWeek = () => setWeekSunday(getSundayOf(new Date()));
+
+  const isCurrentWeek = useMemo(() => {
+    const thisWeekSunday = getSundayOf(new Date());
+    return weekSunday.getTime() === thisWeekSunday.getTime();
+  }, [weekSunday]);
+
+  // CTA bar height: tab bar is ~60px + insets.bottom
+  const TAB_BAR_HEIGHT = 60;
+  const ctaBottom = insets.bottom + TAB_BAR_HEIGHT + 10;
 
   if (isLoading) {
     return (
@@ -367,27 +410,55 @@ export default function TimeGuardianHome() {
 
   return (
     <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scroll}>
-        <EnergyCheckIn todayEnergy={todayEnergy} onCheckIn={checkInEnergy} />
+      <ScrollView
+        contentContainerStyle={[
+          styles.scroll,
+          { paddingBottom: ctaBottom + 70 },
+        ]}
+      >
+        {/* Energy check-in — today only */}
+        {isCurrentWeek && (
+          <EnergyCheckIn todayEnergy={todayEnergy} onCheckIn={checkInEnergy} />
+        )}
 
-        <View style={styles.weekHeader}>
-          <Text style={styles.sectionLabel}>THIS WEEK</Text>
-          <View style={styles.weekActions}>
-            <TouchableOpacity onPress={() => router.push('/tabs/timeguardian/ledger')}>
-              <Text style={styles.weekAction}>Ledger</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => router.push('/tabs/timeguardian/settings')} style={{ marginLeft: 16 }}>
-              <Text style={styles.weekAction}>Settings</Text>
-            </TouchableOpacity>
+        {/* Week navigation header */}
+        <View style={styles.weekNav}>
+          <TouchableOpacity style={styles.navArrowBtn} onPress={goToPrevWeek}>
+            <Text style={styles.navArrow}>‹</Text>
+          </TouchableOpacity>
+
+          <View style={styles.weekNavCenter}>
+            <Text style={styles.weekRangeLabel}>{weekRangeLabel(weekSunday)}</Text>
+            {!isCurrentWeek && (
+              <TouchableOpacity onPress={goToThisWeek}>
+                <Text style={styles.thisWeekLink}>Back to this week</Text>
+              </TouchableOpacity>
+            )}
           </View>
+
+          <TouchableOpacity style={styles.navArrowBtn} onPress={goToNextWeek}>
+            <Text style={styles.navArrow}>›</Text>
+          </TouchableOpacity>
         </View>
 
+        {/* Nav links */}
+        <View style={styles.weekActions}>
+          <TouchableOpacity onPress={() => router.push('/tabs/timeguardian/ledger')}>
+            <Text style={styles.weekAction}>Ledger</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => router.push('/tabs/timeguardian/settings')} style={{ marginLeft: 16 }}>
+            <Text style={styles.weekAction}>Settings</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Day cards */}
         {weekDates.map((d) => (
           <DaySection key={d} dateStr={d} anchorDate={anchorDate} customBlocks={customBlocks} />
         ))}
       </ScrollView>
 
-      <View style={styles.ctaBar}>
+      {/* CTA bar — positioned above tab bar using safe area insets */}
+      <View style={[styles.ctaBar, { bottom: ctaBottom }]}>
         <TouchableOpacity style={styles.exceptionCta} onPress={() => setExceptionModal(true)}>
           <Text style={styles.exceptionCtaText}>Exception</Text>
         </TouchableOpacity>
@@ -410,41 +481,50 @@ export default function TimeGuardianHome() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: TGColors.background },
   centered : { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: TGColors.background },
-  scroll   : { padding: 16, paddingBottom: 110 },
+  scroll   : { padding: 16 },
 
   anchorWrap : { flex: 1, backgroundColor: TGColors.background, padding: 28, justifyContent: 'center' },
   anchorTitle: { fontSize: 26, color: TGColors.ink, fontWeight: '700', marginBottom: 14 },
   anchorBody : { fontSize: 14, color: TGColors.muted, lineHeight: 22, marginBottom: 24 },
 
-  energyCard   : { backgroundColor: TGColors.surface, borderRadius: 12, padding: 16, marginBottom: 20 },
+  energyCard   : { backgroundColor: TGColors.surface, borderRadius: 12, padding: 16, marginBottom: 16 },
   energyHeading: { color: TGColors.muted, fontSize: 13, marginBottom: 12 },
   energyBtn    : { borderWidth: 1, borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 },
   energyBtnText: { fontSize: 12, fontWeight: '500' },
   causeChip    : { backgroundColor: TGColors.surfaceRaised, borderRadius: 16, paddingHorizontal: 12, paddingVertical: 6 },
   causeChipText: { color: TGColors.ink, fontSize: 12 },
 
-  weekHeader : { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  sectionLabel: { color: TGColors.muted, fontSize: 11, fontWeight: '600', letterSpacing: 1 },
-  weekActions : { flexDirection: 'row' },
-  weekAction  : { color: TGColors.gold, fontSize: 13, fontWeight: '500' },
+  // Week navigation
+  weekNav       : { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
+  navArrowBtn   : { padding: 10 },
+  navArrow      : { color: TGColors.gold, fontSize: 28, fontWeight: '300', lineHeight: 32 },
+  weekNavCenter : { flex: 1, alignItems: 'center' },
+  weekRangeLabel: { color: TGColors.ink, fontSize: 15, fontWeight: '600' },
+  thisWeekLink  : { color: TGColors.gold, fontSize: 12, marginTop: 4 },
 
+  weekActions: { flexDirection: 'row', justifyContent: 'flex-end', marginBottom: 12 },
+  weekAction : { color: TGColors.gold, fontSize: 13, fontWeight: '500' },
+
+  // Day cards — date info now shown clearly
   dayCard     : { backgroundColor: TGColors.surface, borderRadius: 12, padding: 14, marginBottom: 10 },
   dayCardToday: { borderWidth: 1, borderColor: TGColors.gold },
-  dayHeader   : { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
-  dayName     : { color: TGColors.ink, fontWeight: '600', fontSize: 15 },
-  dayDate     : { color: TGColors.muted, fontSize: 13 },
+  dayHeader   : { marginBottom: 10 },
+  dayName     : { color: TGColors.ink, fontWeight: '700', fontSize: 15 },
+  todayTag    : { color: TGColors.gold, fontSize: 12, fontWeight: '500' },
+  dayDate     : { color: TGColors.muted, fontSize: 12, marginTop: 2 },
   openText    : { color: TGColors.faint, fontSize: 13, fontStyle: 'italic' },
 
-  blockRow  : { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
-  blockBar  : { width: 3, borderRadius: 2, minHeight: 32, marginRight: 10 },
-  blockLabel: { color: TGColors.ink, fontSize: 13, fontWeight: '500' },
-  blockTime : { color: TGColors.muted, fontSize: 11, marginTop: 2 },
-  softTag   : { backgroundColor: TGColors.surfaceRaised, borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2 },
+  blockRow   : { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
+  blockBar   : { width: 3, borderRadius: 2, minHeight: 32, marginRight: 10 },
+  blockLabel : { color: TGColors.ink, fontSize: 13, fontWeight: '500' },
+  blockTime  : { color: TGColors.muted, fontSize: 11, marginTop: 2 },
+  softTag    : { backgroundColor: TGColors.surfaceRaised, borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2 },
   softTagText: { color: TGColors.faint, fontSize: 10 },
 
-  ctaBar      : { position: 'absolute', bottom: 20, left: 16, right: 16, flexDirection: 'row', gap: 10 },
-  checkCta    : { flex: 1, backgroundColor: TGColors.gold, borderRadius: 12, padding: 16, alignItems: 'center' },
-  checkCtaText: { color: TGColors.background, fontWeight: '700', fontSize: 14 },
+  // CTA bar — bottom is computed dynamically from insets
+  ctaBar          : { position: 'absolute', left: 16, right: 16, flexDirection: 'row', gap: 10 },
+  checkCta        : { flex: 1, backgroundColor: TGColors.gold, borderRadius: 12, padding: 16, alignItems: 'center' },
+  checkCtaText    : { color: TGColors.background, fontWeight: '700', fontSize: 14 },
   exceptionCta    : { borderWidth: 1, borderColor: TGColors.clayDim, borderRadius: 12, padding: 16, alignItems: 'center', paddingHorizontal: 14 },
   exceptionCtaText: { color: TGColors.clay, fontWeight: '600', fontSize: 14 },
 
@@ -468,12 +548,12 @@ const styles = StyleSheet.create({
   ghostBtn    : { padding: 14, alignItems: 'center', marginTop: 4 },
   ghostBtnText: { color: TGColors.muted, fontSize: 14 },
 
-  resultTitle  : { fontSize: 20, fontWeight: '700', marginBottom: 8 },
-  resultSub    : { color: TGColors.muted, fontSize: 14, marginBottom: 8 },
-  conflictCard : { backgroundColor: TGColors.surface, borderRadius: 10, padding: 14, borderLeftWidth: 4, marginBottom: 10 },
-  conflictLabel: { color: TGColors.ink, fontWeight: '600', fontSize: 15 },
-  conflictTime : { color: TGColors.muted, fontSize: 12, marginTop: 4 },
-  conflictExtra: { color: TGColors.muted, fontSize: 12, marginBottom: 8 },
+  resultTitle    : { fontSize: 20, fontWeight: '700', marginBottom: 8 },
+  resultSub      : { color: TGColors.muted, fontSize: 14, marginBottom: 8 },
+  conflictCard   : { backgroundColor: TGColors.surface, borderRadius: 10, padding: 14, borderLeftWidth: 4, marginBottom: 10 },
+  conflictLabel  : { color: TGColors.ink, fontWeight: '600', fontSize: 15 },
+  conflictTime   : { color: TGColors.muted, fontSize: 12, marginTop: 4 },
+  conflictExtra  : { color: TGColors.muted, fontSize: 12, marginBottom: 8 },
   conflictWarning: { color: TGColors.clay, fontSize: 13, marginBottom: 12, lineHeight: 20 },
 
   exceptionNote: { color: TGColors.muted, fontSize: 13, lineHeight: 20, marginBottom: 20, fontStyle: 'italic' },

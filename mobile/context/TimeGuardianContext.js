@@ -1,48 +1,57 @@
 /**
  * TimeGuardianContext.js
  * Global state for Time Guardian — matches existing AuthContext pattern.
- * All storage calls go through repository.js only.
+ * Now includes workHours and rotationSchedule loaded from storage.
  */
 
 import React, { createContext, useContext, useReducer, useCallback, useEffect } from 'react';
 import {
   getRotationAnchor, setRotationAnchor,
+  getWorkHours, saveWorkHours,
+  getRotationSchedule, saveRotationSchedule, updateRotationSlot,
   getCustomBlocks, addCustomBlock, updateCustomBlock, deleteCustomBlock, toggleCustomBlockActive,
   addLogEntry, getRecentLogEntries,
   getEnergyEntries, getEnergyChartData, upsertEnergyEntry,
+  DEFAULT_WORK_HOURS, DEFAULT_ROTATION_SCHEDULE,
 } from '../timeguardian/storage/repository';
 import { todayStr, nowTimeStr } from '../timeguardian/logic/dayBlocks';
 
 const TimeGuardianContext = createContext(null);
 
 const initialState = {
-  isLoading   : true,
-  anchorDate  : null,
-  customBlocks: [],
-  logEntries  : [],
-  energyEntries: [],
-  energyChartData: [],
-  todayEnergy : null,
+  isLoading        : true,
+  anchorDate       : null,
+  workHours        : DEFAULT_WORK_HOURS,
+  rotationSchedule : DEFAULT_ROTATION_SCHEDULE,
+  customBlocks     : [],
+  logEntries       : [],
+  energyEntries    : [],
+  energyChartData  : [],
+  todayEnergy      : null,
 };
 
 const A = {
-  SET_LOADING : 'SET_LOADING',
-  BOOTSTRAP   : 'BOOTSTRAP',
-  SET_ANCHOR  : 'SET_ANCHOR',
-  SET_BLOCKS  : 'SET_BLOCKS',
-  SET_LOGS    : 'SET_LOGS',
-  SET_ENERGY  : 'SET_ENERGY',
+  SET_LOADING       : 'SET_LOADING',
+  BOOTSTRAP         : 'BOOTSTRAP',
+  SET_ANCHOR        : 'SET_ANCHOR',
+  SET_WORK_HOURS    : 'SET_WORK_HOURS',
+  SET_ROTATION      : 'SET_ROTATION',
+  SET_BLOCKS        : 'SET_BLOCKS',
+  SET_LOGS          : 'SET_LOGS',
+  SET_ENERGY        : 'SET_ENERGY',
 };
 
 function reducer(state, action) {
   switch (action.type) {
-    case A.SET_LOADING : return { ...state, isLoading: action.payload };
-    case A.BOOTSTRAP   : return { ...state, isLoading: false, ...action.payload };
-    case A.SET_ANCHOR  : return { ...state, anchorDate: action.payload };
-    case A.SET_BLOCKS  : return { ...state, customBlocks: action.payload };
-    case A.SET_LOGS    : return { ...state, logEntries: action.payload };
-    case A.SET_ENERGY  : return { ...state, ...action.payload };
-    default            : return state;
+    case A.SET_LOADING    : return { ...state, isLoading: action.payload };
+    case A.BOOTSTRAP      : return { ...state, isLoading: false, ...action.payload };
+    case A.SET_ANCHOR     : return { ...state, anchorDate: action.payload };
+    case A.SET_WORK_HOURS : return { ...state, workHours: action.payload };
+    case A.SET_ROTATION   : return { ...state, rotationSchedule: action.payload };
+    case A.SET_BLOCKS     : return { ...state, customBlocks: action.payload };
+    case A.SET_LOGS       : return { ...state, logEntries: action.payload };
+    case A.SET_ENERGY     : return { ...state, ...action.payload };
+    default               : return state;
   }
 }
 
@@ -51,8 +60,13 @@ export function TimeGuardianProvider({ children }) {
 
   useEffect(() => {
     (async () => {
-      const [anchor, blocks, logs, energyEntries, energyChartData] = await Promise.all([
+      const [
+        anchor, workHours, rotationSchedule,
+        blocks, logs, energyEntries, energyChartData,
+      ] = await Promise.all([
         getRotationAnchor(),
+        getWorkHours(),
+        getRotationSchedule(),
         getCustomBlocks(),
         getRecentLogEntries(),
         getEnergyEntries(),
@@ -69,6 +83,8 @@ export function TimeGuardianProvider({ children }) {
         type: A.BOOTSTRAP,
         payload: {
           anchorDate: anchor?.anchor_date ?? null,
+          workHours,
+          rotationSchedule,
           customBlocks: blocks,
           logEntries: logs,
           energyEntries,
@@ -86,6 +102,26 @@ export function TimeGuardianProvider({ children }) {
     dispatch({ type: A.SET_ANCHOR, payload: dateStr });
   }, []);
 
+  // ── Work Hours ────────────────────────────────────────────────────────────
+
+  const updateWorkHours = useCallback(async (hours) => {
+    await saveWorkHours(hours);
+    dispatch({ type: A.SET_WORK_HOURS, payload: hours });
+  }, []);
+
+  // ── Rotation Schedule ─────────────────────────────────────────────────────
+
+  const updateRotationSlotById = useCallback(async (index, changes) => {
+    await updateRotationSlot(index, changes);
+    const updated = await getRotationSchedule();
+    dispatch({ type: A.SET_ROTATION, payload: updated });
+  }, []);
+
+  const resetRotationSchedule = useCallback(async () => {
+    await saveRotationSchedule(DEFAULT_ROTATION_SCHEDULE);
+    dispatch({ type: A.SET_ROTATION, payload: DEFAULT_ROTATION_SCHEDULE });
+  }, []);
+
   // ── Custom Blocks ─────────────────────────────────────────────────────────
 
   const refreshBlocks = useCallback(async () => {
@@ -93,10 +129,10 @@ export function TimeGuardianProvider({ children }) {
     dispatch({ type: A.SET_BLOCKS, payload: blocks });
   }, []);
 
-  const createBlock  = useCallback(async (b)         => { await addCustomBlock(b);           await refreshBlocks(); }, [refreshBlocks]);
-  const editBlock    = useCallback(async (id, changes)=> { await updateCustomBlock(id, changes); await refreshBlocks(); }, [refreshBlocks]);
-  const removeBlock  = useCallback(async (id)         => { await deleteCustomBlock(id);       await refreshBlocks(); }, [refreshBlocks]);
-  const toggleBlock  = useCallback(async (id)         => { await toggleCustomBlockActive(id); await refreshBlocks(); }, [refreshBlocks]);
+  const createBlock = useCallback(async (b)          => { await addCustomBlock(b);              await refreshBlocks(); }, [refreshBlocks]);
+  const editBlock   = useCallback(async (id, changes) => { await updateCustomBlock(id, changes); await refreshBlocks(); }, [refreshBlocks]);
+  const removeBlock = useCallback(async (id)          => { await deleteCustomBlock(id);          await refreshBlocks(); }, [refreshBlocks]);
+  const toggleBlock = useCallback(async (id)          => { await toggleCustomBlockActive(id);    await refreshBlocks(); }, [refreshBlocks]);
 
   // ── Log ───────────────────────────────────────────────────────────────────
 
@@ -131,6 +167,9 @@ export function TimeGuardianProvider({ children }) {
     <TimeGuardianContext.Provider value={{
       ...state,
       saveAnchorDate,
+      updateWorkHours,
+      updateRotationSlotById,
+      resetRotationSchedule,
       createBlock, editBlock, removeBlock, toggleBlock,
       logEntry,
       checkInEnergy,
