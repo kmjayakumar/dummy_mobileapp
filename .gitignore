@@ -13,3 +13,8 @@ mobile/app/tabs/timeguardian/settings old.jsx
 mobile/context/TimeGuardianContext old.js
 mobile/timeguardian/logic/dayBlocks old.js
 mobile/timeguardian/storage/repository old.js
+mobile/app/tabs/timeguardian/index old 0607.jsx
+mobile/app/tabs/timeguardian/settings old 0607.jsx
+mobile/context/TimeGuardianContext old 0607.js
+mobile/timeguardian/logic/dayBlocks old 0607.js
+mobile/timeguardian/storage/repository old 0607.js
