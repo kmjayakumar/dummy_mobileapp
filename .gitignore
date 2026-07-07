@@ -18,3 +18,6 @@ mobile/app/tabs/timeguardian/settings old 0607.jsx
 mobile/context/TimeGuardianContext old 0607.js
 mobile/timeguardian/logic/dayBlocks old 0607.js
 mobile/timeguardian/storage/repository old 0607.js
+mobile/app/tabs/tools/audio-converter claude.js
+mobile/app/tabs/tools/audio-converter old.js
+mobile/app/tabs/tools/converted-files old.js

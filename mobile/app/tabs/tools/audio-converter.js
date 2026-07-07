@@ -23,10 +23,11 @@ import Card from '../../../components/Card';
 import ErrorMessage from '../../../components/ErrorMessage';
 import Colors from '../../../constants/colors';
 import { convertOpusToWav, convertWavToMp3, getConverterOutputDir } from '../../../services/audioConverterService';
-import { saveConversion } from '../../../services/conversionHistoryService';
+import { saveConversion, renameEntry, deleteEntry } from '../../../services/conversionHistoryService';
 import { useShareIntentContext } from '../../../context/ShareIntentContext';
 import { MIME_LABELS } from '../../../types/shareIntent';
 import { clearStagingFile } from '../../../services/shareIntentService';
+import { useAudioPlayer } from '../../../hooks/useAudioPlayer';
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
@@ -77,6 +78,7 @@ export default function ConverterScreen() {
   const hasFile = Boolean(selectedFile?.uri);
 
   const router = useRouter();
+  const player = useAudioPlayer();
 
   // Tracks the staged URI for the current shared file so we can delete it
   // from cache/share_staging/ after conversion or when the user cancels.
@@ -168,6 +170,16 @@ export default function ConverterScreen() {
     }
   };
 
+  const togglePlayOutputFile = async (kind) => {
+    const output = getOutputByKind(kind);
+    if (!output?.uri) return;
+    try {
+      await player.play(output.uri);
+    } catch (err) {
+      setError(err?.message || 'Playback failed.');
+    }
+  };
+
   const openRenameModal = (kind) => {
     const output = getOutputByKind(kind);
     if (!output || isBusy) return;
@@ -199,6 +211,29 @@ export default function ConverterScreen() {
     setSuccessMessage('');
 
     try {
+      await player.stop(output.uri);
+
+      if (output.historyId) {
+        // Goes through the same function the Converted Files screen uses —
+        // moves the file AND updates the stored history record in one place,
+        // so this screen and Converted Files never fall out of sync.
+        const updatedEntry = await renameEntry(output.historyId, raw);
+        const updated = {
+          ...output,
+          uri: updatedEntry.fileUri,
+          path: updatedEntry.fileUri,
+          fileName: updatedEntry.fileName,
+          size: updatedEntry.size,
+        };
+        if (kind === 'wav') setWavOutput(updated);
+        if (kind === 'mp3') setMp3Output(updated);
+
+        setSuccessMessage(`Renamed to ${updatedEntry.fileName}`);
+        closeRenameModal();
+        return;
+      }
+
+      // Fallback for outputs that somehow have no history record yet.
       const currentFileName = output.fileName || 'audio';
       const ext = currentFileName.includes('.')
         ? currentFileName.slice(currentFileName.lastIndexOf('.'))
@@ -251,7 +286,13 @@ export default function ConverterScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await FileSystem.deleteAsync(output.uri, { idempotent: true });
+              await player.stop(output.uri);
+              if (output.historyId) {
+                // Removes the file AND the history record together.
+                await deleteEntry(output.historyId);
+              } else {
+                await FileSystem.deleteAsync(output.uri, { idempotent: true });
+              }
               if (kind === 'wav') setWavOutput(null);
               if (kind === 'mp3') setMp3Output(null);
               setSuccessMessage(`Deleted ${output.fileName}`);
@@ -344,9 +385,9 @@ export default function ConverterScreen() {
 
     try {
       const result = await convertWavToMp3(wavResult, selectedFile.name, setProgress);
-      setMp3Output(result);
       setSuccessMessage(`MP3 saved · ${result.fileName} (${formatFileSize(result.size)})`);
-      await saveConversion({ fileName: result.fileName, fileUri: result.uri, format: 'mp3', size: result.size });
+      const historyEntry = await saveConversion({ fileName: result.fileName, fileUri: result.uri, format: 'mp3', size: result.size });
+      setMp3Output({ ...result, historyId: historyEntry?.id || null });
     } catch (err) {
       setError(err.message || 'MP3 conversion failed.');
     } finally {
@@ -384,9 +425,9 @@ export default function ConverterScreen() {
         setProgress,
         selectedFile.mimeType,
       );
-      setWavOutput(result);
       setSuccessMessage(`WAV saved · ${result.fileName} (${formatFileSize(result.size)})`);
-      await saveConversion({ fileName: result.fileName, fileUri: result.uri, format: 'wav', size: result.size });
+      const historyEntry = await saveConversion({ fileName: result.fileName, fileUri: result.uri, format: 'wav', size: result.size });
+      setWavOutput({ ...result, historyId: historyEntry?.id || null });
 
       // Upload succeeded — the staged file is no longer needed. Clean it up
       // before prompting for MP3 so cache is reclaimed as early as possible.
@@ -611,6 +652,9 @@ export default function ConverterScreen() {
                   path={displayPhonePath(wavOutput.uri)}
                   color={Colors.info}
                   last={!mp3Output}
+                  isPlaying={player.playingUri === wavOutput.uri && player.isPlaying}
+                  isLoadingAudio={player.isLoading && player.playingUri === wavOutput.uri}
+                  onPlayPause={() => togglePlayOutputFile('wav')}
                   onShare={() => shareOutputFile('wav')}
                   onRename={() => openRenameModal('wav')}
                   onDelete={() => deleteOutputFile('wav')}
@@ -626,6 +670,9 @@ export default function ConverterScreen() {
                   path={displayPhonePath(mp3Output.uri)}
                   color={Colors.success}
                   last
+                  isPlaying={player.playingUri === mp3Output.uri && player.isPlaying}
+                  isLoadingAudio={player.isLoading && player.playingUri === mp3Output.uri}
+                  onPlayPause={() => togglePlayOutputFile('mp3')}
                   onShare={() => shareOutputFile('mp3')}
                   onRename={() => openRenameModal('mp3')}
                   onDelete={() => deleteOutputFile('mp3')}
@@ -701,6 +748,7 @@ export default function ConverterScreen() {
 
 const OutputRow = React.memo(function OutputRow({
   icon, label, fileName, path, color, last,
+  isPlaying, isLoadingAudio, onPlayPause,
   onShare, onRename, onDelete, actionsDisabled,
 }) {
   return (
@@ -713,6 +761,11 @@ const OutputRow = React.memo(function OutputRow({
       <Text style={styles.outputPathLabel}>Full path on phone</Text>
       <Text style={styles.outputPath} selectable>{path}</Text>
       <View style={styles.outputActions}>
+        <TouchableOpacity onPress={onPlayPause} disabled={actionsDisabled || isLoadingAudio} style={styles.iconBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          {isLoadingAudio
+            ? <ActivityIndicator size="small" color={color} />
+            : <Ionicons name={isPlaying ? 'pause' : 'play'} size={18} color={color} />}
+        </TouchableOpacity>
         <TouchableOpacity onPress={onShare}  disabled={actionsDisabled} style={styles.iconBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="share-social-outline" size={18} color={color} />
         </TouchableOpacity>

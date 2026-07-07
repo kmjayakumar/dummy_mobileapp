@@ -24,6 +24,7 @@ import {
   removeRecord,
   fileExists,
 } from '../../../services/conversionHistoryService';
+import { useAudioPlayer } from '../../../hooks/useAudioPlayer';
 
 // ─── pure helpers (module-level, never recreated) ─────────────────────────────
 
@@ -71,6 +72,9 @@ const FileItem = React.memo(function FileItem({
   item,
   isMissing,
   isLast,
+  isPlaying,
+  isLoadingAudio,
+  onPlayPause,
   onOpen,
   onShare,
   onRename,
@@ -112,6 +116,13 @@ const FileItem = React.memo(function FileItem({
         ) : null}
 
         <View style={styles.actions}>
+          <ActionBtn
+            icon={isLoadingAudio ? 'hourglass-outline' : isPlaying ? 'pause' : 'play'}
+            label={isLoadingAudio ? 'Loading' : isPlaying ? 'Pause' : 'Play'}
+            color={accentColor}
+            onPress={onPlayPause}
+            disabled={isMissing || isLoadingAudio}
+          />
           <ActionBtn icon="open-outline"        label="Open"   color={Colors.textSecondary} onPress={onOpen}         disabled={isMissing} />
           <ActionBtn icon="share-social-outline" label="Share"  color={Colors.textSecondary} onPress={onShare}        disabled={isMissing} />
           <ActionBtn icon="create-outline"       label="Rename" color={Colors.primary}       onPress={onRename}       disabled={isMissing} />
@@ -136,6 +147,8 @@ export default function ConvertedFilesScreen() {
   const [renameInput, setRenameInput]     = useState('');
   const [renameBusy, setRenameBusy]       = useState(false);
   const [renameError, setRenameError]     = useState('');
+
+  const player = useAudioPlayer();
 
   // ── data loading ────────────────────────────────────────────────────────────
 
@@ -197,6 +210,14 @@ export default function ConvertedFilesScreen() {
 
   const handleOpen = useCallback((entry) => handleShare(entry), [handleShare]);
 
+  const handlePlayPause = useCallback(async (entry) => {
+    try {
+      await player.play(entry.fileUri);
+    } catch (err) {
+      Alert.alert('Playback failed', err?.message || 'Could not play this file.');
+    }
+  }, [player.play]);
+
   const openRenameModal = useCallback((entry) => {
     const ext = entry.fileName.includes('.')
       ? entry.fileName.slice(entry.fileName.lastIndexOf('.'))
@@ -246,6 +267,7 @@ export default function ConvertedFilesScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
+              await player.stop(entry.fileUri);
               await deleteEntry(entry.id);
               setEntries((prev) => prev.filter((e) => e.id !== entry.id));
               setMissingIds((prev) => {
@@ -261,7 +283,7 @@ export default function ConvertedFilesScreen() {
       ],
       { cancelable: true }
     );
-  }, []);
+  }, [player.stop]);
 
   const handleRemoveBroken = useCallback((entry) => {
     Alert.alert(
@@ -308,6 +330,9 @@ export default function ConvertedFilesScreen() {
         item={item}
         isMissing={isMissing}
         isLast={isLast}
+        isPlaying={player.playingUri === item.fileUri && player.isPlaying}
+        isLoadingAudio={player.isLoading && player.playingUri === item.fileUri}
+        onPlayPause={() => handlePlayPause(item)}
         onOpen={() => handleOpen(item)}
         onShare={() => handleShare(item)}
         onRename={() => openRenameModal(item)}
@@ -315,7 +340,11 @@ export default function ConvertedFilesScreen() {
         onRemoveBroken={() => handleRemoveBroken(item)}
       />
     );
-  }, [missingIds, filtered.length, handleOpen, handleShare, openRenameModal, handleDelete, handleRemoveBroken]);
+  }, [
+    missingIds, filtered.length,
+    player.playingUri, player.isPlaying, player.isLoading,
+    handlePlayPause, handleOpen, handleShare, openRenameModal, handleDelete, handleRemoveBroken,
+  ]);
 
   // ── render ───────────────────────────────────────────────────────────────────
 
