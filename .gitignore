@@ -21,3 +21,6 @@ mobile/timeguardian/storage/repository old 0607.js
 mobile/app/tabs/tools/audio-converter claude.js
 mobile/app/tabs/tools/audio-converter old.js
 mobile/app/tabs/tools/converted-files old.js
+mobile/app/tabs/tools/audio-converter old 08072026.js
+mobile/app/tabs/tools/converted-files old 08072026.js
+mobile/hooks/useAudioPlayer old.js

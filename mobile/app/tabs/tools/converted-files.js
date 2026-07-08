@@ -16,6 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import Button from '../../../components/Button';
+import PlaybackBar from '../../../components/PlaybackBar';
 import Colors from '../../../constants/colors';
 import {
   getHistory,
@@ -72,9 +73,7 @@ const FileItem = React.memo(function FileItem({
   item,
   isMissing,
   isLast,
-  isPlaying,
-  isLoadingAudio,
-  onPlayPause,
+  player,
   onOpen,
   onShare,
   onRename,
@@ -113,16 +112,11 @@ const FileItem = React.memo(function FileItem({
             <Ionicons name="warning-outline" size={13} color={Colors.warning} />
             <Text style={styles.missingText}>File missing — tap to remove</Text>
           </TouchableOpacity>
-        ) : null}
+        ) : (
+          <PlaybackBar player={player} uri={item.fileUri} color={accentColor} disabled={isMissing} />
+        )}
 
         <View style={styles.actions}>
-          <ActionBtn
-            icon={isLoadingAudio ? 'hourglass-outline' : isPlaying ? 'pause' : 'play'}
-            label={isLoadingAudio ? 'Loading' : isPlaying ? 'Pause' : 'Play'}
-            color={accentColor}
-            onPress={onPlayPause}
-            disabled={isMissing || isLoadingAudio}
-          />
           <ActionBtn icon="open-outline"        label="Open"   color={Colors.textSecondary} onPress={onOpen}         disabled={isMissing} />
           <ActionBtn icon="share-social-outline" label="Share"  color={Colors.textSecondary} onPress={onShare}        disabled={isMissing} />
           <ActionBtn icon="create-outline"       label="Rename" color={Colors.primary}       onPress={onRename}       disabled={isMissing} />
@@ -209,14 +203,6 @@ export default function ConvertedFilesScreen() {
   }, []);
 
   const handleOpen = useCallback((entry) => handleShare(entry), [handleShare]);
-
-  const handlePlayPause = useCallback(async (entry) => {
-    try {
-      await player.play(entry.fileUri);
-    } catch (err) {
-      Alert.alert('Playback failed', err?.message || 'Could not play this file.');
-    }
-  }, [player.play]);
 
   const openRenameModal = useCallback((entry) => {
     const ext = entry.fileName.includes('.')
@@ -330,9 +316,7 @@ export default function ConvertedFilesScreen() {
         item={item}
         isMissing={isMissing}
         isLast={isLast}
-        isPlaying={player.playingUri === item.fileUri && player.isPlaying}
-        isLoadingAudio={player.isLoading && player.playingUri === item.fileUri}
-        onPlayPause={() => handlePlayPause(item)}
+        player={player}
         onOpen={() => handleOpen(item)}
         onShare={() => handleShare(item)}
         onRename={() => openRenameModal(item)}
@@ -341,9 +325,8 @@ export default function ConvertedFilesScreen() {
       />
     );
   }, [
-    missingIds, filtered.length,
-    player.playingUri, player.isPlaying, player.isLoading,
-    handlePlayPause, handleOpen, handleShare, openRenameModal, handleDelete, handleRemoveBroken,
+    missingIds, filtered.length, player,
+    handleOpen, handleShare, openRenameModal, handleDelete, handleRemoveBroken,
   ]);
 
   // ── render ───────────────────────────────────────────────────────────────────

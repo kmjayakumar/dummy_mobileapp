@@ -21,6 +21,7 @@ import * as FileSystem from 'expo-file-system';
 import Button from '../../../components/Button';
 import Card from '../../../components/Card';
 import ErrorMessage from '../../../components/ErrorMessage';
+import PlaybackBar from '../../../components/PlaybackBar';
 import Colors from '../../../constants/colors';
 import { convertOpusToWav, convertWavToMp3, getConverterOutputDir } from '../../../services/audioConverterService';
 import { saveConversion, renameEntry, deleteEntry } from '../../../services/conversionHistoryService';
@@ -167,16 +168,6 @@ export default function ConverterScreen() {
       await Sharing.shareAsync(output.uri);
     } catch (err) {
       setError(err?.message || 'Failed to share file.');
-    }
-  };
-
-  const togglePlayOutputFile = async (kind) => {
-    const output = getOutputByKind(kind);
-    if (!output?.uri) return;
-    try {
-      await player.play(output.uri);
-    } catch (err) {
-      setError(err?.message || 'Playback failed.');
     }
   };
 
@@ -652,9 +643,8 @@ export default function ConverterScreen() {
                   path={displayPhonePath(wavOutput.uri)}
                   color={Colors.info}
                   last={!mp3Output}
-                  isPlaying={player.playingUri === wavOutput.uri && player.isPlaying}
-                  isLoadingAudio={player.isLoading && player.playingUri === wavOutput.uri}
-                  onPlayPause={() => togglePlayOutputFile('wav')}
+                  player={player}
+                  uri={wavOutput.uri}
                   onShare={() => shareOutputFile('wav')}
                   onRename={() => openRenameModal('wav')}
                   onDelete={() => deleteOutputFile('wav')}
@@ -670,9 +660,8 @@ export default function ConverterScreen() {
                   path={displayPhonePath(mp3Output.uri)}
                   color={Colors.success}
                   last
-                  isPlaying={player.playingUri === mp3Output.uri && player.isPlaying}
-                  isLoadingAudio={player.isLoading && player.playingUri === mp3Output.uri}
-                  onPlayPause={() => togglePlayOutputFile('mp3')}
+                  player={player}
+                  uri={mp3Output.uri}
                   onShare={() => shareOutputFile('mp3')}
                   onRename={() => openRenameModal('mp3')}
                   onDelete={() => deleteOutputFile('mp3')}
@@ -748,7 +737,7 @@ export default function ConverterScreen() {
 
 const OutputRow = React.memo(function OutputRow({
   icon, label, fileName, path, color, last,
-  isPlaying, isLoadingAudio, onPlayPause,
+  player, uri,
   onShare, onRename, onDelete, actionsDisabled,
 }) {
   return (
@@ -760,12 +749,10 @@ const OutputRow = React.memo(function OutputRow({
       {fileName ? <Text style={styles.outputFileName} selectable>{fileName}</Text> : null}
       <Text style={styles.outputPathLabel}>Full path on phone</Text>
       <Text style={styles.outputPath} selectable>{path}</Text>
+
+      <PlaybackBar player={player} uri={uri} color={color} disabled={actionsDisabled} />
+
       <View style={styles.outputActions}>
-        <TouchableOpacity onPress={onPlayPause} disabled={actionsDisabled || isLoadingAudio} style={styles.iconBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          {isLoadingAudio
-            ? <ActivityIndicator size="small" color={color} />
-            : <Ionicons name={isPlaying ? 'pause' : 'play'} size={18} color={color} />}
-        </TouchableOpacity>
         <TouchableOpacity onPress={onShare}  disabled={actionsDisabled} style={styles.iconBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="share-social-outline" size={18} color={color} />
         </TouchableOpacity>

@@ -12,12 +12,16 @@
  *
  * Usage:
  *   const player = useAudioPlayer();
- *   <Icon name={player.playingUri === uri && player.isPlaying ? 'pause' : 'play'}
- *         onPress={() => player.play(uri)} />
+ *   player.play(uri)            // play, or toggle pause/resume if already loaded
+ *   player.seek(uri, ms)        // jump to an absolute position (loads file if needed)
+ *   player.seekBy(uri, deltaMs) // relative jump, e.g. +10000 / -10000 for FF/RW
+ *   player.stop(uri)            // stop + unload
  *
- * Calling play(uri) again on the currently-loaded uri toggles pause/resume.
- * Calling play(uri) with a different uri stops/unloads the previous sound
- * first, then loads and plays the new one.
+ *   player.playingUri     — uri of the currently loaded file (or null)
+ *   player.isPlaying       — is it actively playing right now
+ *   player.isLoading       — is a load in progress
+ *   player.positionMillis  — current playback position (only meaningful while loaded)
+ *   player.durationMillis  — total duration (only meaningful once loaded)
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -29,6 +33,20 @@ const listeners = new Set();
 
 function broadcast(update) {
   listeners.forEach((cb) => cb(update));
+}
+
+function onStatusUpdate(uri, status) {
+  if (!status.isLoaded) return;
+  broadcast({
+    uri,
+    isPlaying: status.isPlaying,
+    isLoading: false,
+    positionMillis: status.positionMillis || 0,
+    durationMillis: status.durationMillis || 0,
+  });
+  if (status.didJustFinish) {
+    unloadActive();
+  }
 }
 
 async function unloadActive() {
@@ -53,6 +71,36 @@ async function unloadActive() {
   }
 }
 
+/**
+ * Loads `uri` fresh (unloading whatever was active first) and applies
+ * `initialStatus` (e.g. { shouldPlay: true, positionMillis: 10000 }).
+ */
+async function loadSound(uri, initialStatus) {
+  await unloadActive();
+  broadcast({
+    uri,
+    isPlaying: false,
+    isLoading: true,
+    positionMillis: initialStatus.positionMillis || 0,
+    durationMillis: 0,
+  });
+
+  try {
+    await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
+    const { sound } = await Audio.Sound.createAsync(
+      { uri },
+      initialStatus,
+      (status) => onStatusUpdate(uri, status)
+    );
+    activeSound = sound;
+    activeUri = uri;
+    await sound.setProgressUpdateIntervalMillis(250);
+  } catch (err) {
+    broadcast({ uri, isPlaying: false, isLoading: false });
+    throw err;
+  }
+}
+
 export function useAudioPlayer() {
   const [state, setState] = useState({
     uri: null,
@@ -70,10 +118,10 @@ export function useAudioPlayer() {
     return () => listeners.delete(onUpdate);
   }, []);
 
+  /** Play `uri`. If it's already loaded, this toggles pause/resume instead. */
   const play = useCallback(async (uri) => {
     if (!uri) return;
 
-    // Toggle play/pause on the file that's already loaded.
     if (activeUri === uri && activeSound) {
       try {
         const status = await activeSound.getStatusAsync();
@@ -86,41 +134,53 @@ export function useAudioPlayer() {
           broadcast({ uri, isPlaying: true, isLoading: false });
         }
       } catch {
-        // If the loaded sound got into a bad state, fall through and reload it.
         await unloadActive();
       }
       return;
     }
 
-    // Switching files — stop and unload whatever was playing first.
-    await unloadActive();
-    broadcast({ uri, isPlaying: false, isLoading: true, positionMillis: 0, durationMillis: 0 });
+    await loadSound(uri, { shouldPlay: true });
+  }, []);
 
-    try {
-      await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
-      const { sound } = await Audio.Sound.createAsync(
-        { uri },
-        { shouldPlay: true },
-        (status) => {
-          if (!status.isLoaded) return;
-          broadcast({
-            uri,
-            isPlaying: status.isPlaying,
-            isLoading: false,
-            positionMillis: status.positionMillis || 0,
-            durationMillis: status.durationMillis || 0,
-          });
-          if (status.didJustFinish) {
-            unloadActive();
-          }
-        }
-      );
-      activeSound = sound;
-      activeUri = uri;
-    } catch (err) {
-      broadcast({ uri, isPlaying: false, isLoading: false });
-      throw err;
+  /** Jump to an absolute position in milliseconds. Loads the file first if needed. */
+  const seek = useCallback(async (uri, positionMillis) => {
+    if (!uri) return;
+    const target = Math.max(0, Math.round(positionMillis));
+
+    if (activeUri === uri && activeSound) {
+      try {
+        await activeSound.setPositionAsync(target);
+        broadcast({ uri, positionMillis: target });
+      } catch {
+        // ignore — a stray seek on a sound mid-teardown isn't worth surfacing
+      }
+      return;
     }
+
+    await loadSound(uri, { shouldPlay: true, positionMillis: target });
+  }, []);
+
+  /** Relative jump — positive to fast-forward, negative to rewind. */
+  const seekBy = useCallback(async (uri, deltaMillis) => {
+    if (!uri) return;
+
+    if (activeUri === uri && activeSound) {
+      try {
+        const status = await activeSound.getStatusAsync();
+        if (!status.isLoaded) return;
+        const duration = status.durationMillis || Number.MAX_SAFE_INTEGER;
+        const target = Math.min(Math.max(0, (status.positionMillis || 0) + deltaMillis), duration);
+        await activeSound.setPositionAsync(target);
+        broadcast({ uri, positionMillis: target });
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    // Not currently loaded — start playback at the offset (from 0).
+    const start = Math.max(0, deltaMillis);
+    await loadSound(uri, { shouldPlay: true, positionMillis: start });
   }, []);
 
   const stop = useCallback(async (uri) => {
@@ -136,6 +196,8 @@ export function useAudioPlayer() {
     positionMillis: state.positionMillis,
     durationMillis: state.durationMillis,
     play,
+    seek,
+    seekBy,
     stop,
   };
 }
