@@ -53,6 +53,22 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 },
 });
 
+// Separate multer config for /edit — the source there is an already-converted
+// WAV or MP3 (not opus), re-uploaded fresh from the phone since the original
+// server-side file is long gone by the time a user opens the editor.
+const editUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+    filename: (req, file, cb) => {
+      const stamp = req.editStamp || makeTimestamp();
+      req.editStamp = stamp;
+      const ext = (path.extname(file.originalname || '') || '.wav').toLowerCase();
+      cb(null, `${stamp}_edit_input${ext}`);
+    },
+  }),
+  limits: { fileSize: 150 * 1024 * 1024 },
+});
+
 function runFfmpeg(command, label) {
   console.log(`[audio] FFmpeg (${label}): ${command}`);
   return execAsync(command, {
@@ -180,5 +196,108 @@ router.post('/wav-to-mp3', async (req, res) => {
     });
   }
 });
+
+/**
+ * Builds an ffmpeg filter_complex graph that:
+ *  - trims out each kept segment (asetpts resets each segment's own timeline)
+ *  - applies volume=0 to segments marked muted (silenced but kept in place)
+ *  - concatenates everything back together in order
+ *
+ * `segments` is already the final "keep" list — deleted segments are simply
+ * absent from the array, so the gap they left closes naturally on concat.
+ */
+function buildEditFilter(segments) {
+  const labels = [];
+  const parts = segments.map((seg, i) => {
+    const label = `a${i}`;
+    labels.push(`[${label}]`);
+    const trim = `[0:a]atrim=start=${seg.start.toFixed(3)}:end=${seg.end.toFixed(3)},asetpts=PTS-STARTPTS`;
+    return seg.muted ? `${trim},volume=0[${label}]` : `${trim}[${label}]`;
+  });
+  const concat = `${labels.join('')}concat=n=${segments.length}:v=0:a=1[outa]`;
+  return `${parts.join('; ')}; ${concat}`;
+}
+
+// POST /api/audio/edit
+// Segment-based editor: split/trim/mute, rendered into ONE new file.
+// Body (multipart): file=<wav|mp3>, format='wav'|'mp3', segments=JSON string
+//   of the KEPT segments only: [{ start, end, muted }, ...] in seconds.
+router.post(
+  '/edit',
+  (req, _res, next) => {
+    req.editStamp = makeTimestamp();
+    next();
+  },
+  editUpload.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        console.log('[audio] edit: no file received');
+        return res.status(400).json({ success: false, message: 'No file uploaded (field name: file)' });
+      }
+
+      const stamp = req.editStamp || makeTimestamp();
+      const format = (req.body.format || '').toLowerCase() === 'mp3' ? 'mp3' : 'wav';
+
+      let rawSegments;
+      try {
+        rawSegments = JSON.parse(req.body.segments || '[]');
+      } catch {
+        return res.status(400).json({ success: false, message: 'Invalid segments JSON.' });
+      }
+
+      if (!Array.isArray(rawSegments) || rawSegments.length === 0) {
+        return res.status(400).json({ success: false, message: 'At least one segment must be kept.' });
+      }
+
+      const segments = rawSegments
+        .map((s) => ({
+          start: Math.max(0, Number(s.start)),
+          end: Math.max(0, Number(s.end)),
+          muted: Boolean(s.muted),
+        }))
+        .filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end - s.start > 0.01);
+
+      if (segments.length === 0) {
+        return res.status(400).json({ success: false, message: 'No valid segments to keep.' });
+      }
+
+      console.log('[audio] edit: request', {
+        originalName: req.file.originalname,
+        stamp,
+        format,
+        segmentCount: segments.length,
+      });
+
+      const inputPath = req.file.path;
+      const outputPath = path.join(OUTPUTS_DIR, `${stamp}_edited.${format}`);
+      const outputDownload = `/downloads/${stamp}_edited.${format}`;
+
+      const filterComplex = buildEditFilter(segments);
+      const codecArgs = format === 'mp3' ? '-b:a 192k' : '';
+      const command = `ffmpeg -y -i "${inputPath}" -filter_complex "${filterComplex}" -map "[outa]" ${codecArgs} "${outputPath}"`;
+
+      await runFfmpeg(command, 'edit');
+
+      if (!fs.existsSync(outputPath)) {
+        console.error('[audio] edit: output was not created', outputPath);
+        return res.status(500).json({ success: false, message: 'Edited file was not created' });
+      }
+
+      console.log('[audio] edit: success →', outputDownload);
+      return res.json({
+        success: true,
+        editedPath: outputDownload,
+        stamp,
+      });
+    } catch (err) {
+      console.error('[audio] edit: failure', err.stderr || err.message || err);
+      return res.status(500).json({
+        success: false,
+        message: err.stderr || err.message || 'FFmpeg edit failed',
+      });
+    }
+  }
+);
 
 module.exports = router;

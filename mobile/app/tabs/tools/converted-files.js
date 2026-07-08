@@ -13,7 +13,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import Button from '../../../components/Button';
 import PlaybackBar from '../../../components/PlaybackBar';
@@ -77,6 +77,7 @@ const FileItem = React.memo(function FileItem({
   onOpen,
   onShare,
   onRename,
+  onEdit,
   onDelete,
   onRemoveBroken,
 }) {
@@ -120,6 +121,7 @@ const FileItem = React.memo(function FileItem({
           <ActionBtn icon="open-outline"        label="Open"   color={Colors.textSecondary} onPress={onOpen}         disabled={isMissing} />
           <ActionBtn icon="share-social-outline" label="Share"  color={Colors.textSecondary} onPress={onShare}        disabled={isMissing} />
           <ActionBtn icon="create-outline"       label="Rename" color={Colors.primary}       onPress={onRename}       disabled={isMissing} />
+          <ActionBtn icon="cut-outline"          label="Edit"   color={Colors.primary}       onPress={onEdit}         disabled={isMissing} />
           <ActionBtn icon="trash-outline"        label="Delete" color={Colors.error}         onPress={onDelete} />
         </View>
       </View>
@@ -130,6 +132,7 @@ const FileItem = React.memo(function FileItem({
 // ─── screen ───────────────────────────────────────────────────────────────────
 
 export default function ConvertedFilesScreen() {
+  const router = useRouter();
   const [entries, setEntries]       = useState([]);
   const [loading, setLoading]       = useState(true);
   const [search, setSearch]         = useState('');
@@ -203,6 +206,13 @@ export default function ConvertedFilesScreen() {
   }, []);
 
   const handleOpen = useCallback((entry) => handleShare(entry), [handleShare]);
+
+  const handleEdit = useCallback((entry) => {
+    router.push({
+      pathname: '/tabs/tools/audio-editor',
+      params: { fileUri: entry.fileUri, fileName: entry.fileName, format: entry.format },
+    });
+  }, [router]);
 
   const openRenameModal = useCallback((entry) => {
     const ext = entry.fileName.includes('.')
@@ -320,13 +330,14 @@ export default function ConvertedFilesScreen() {
         onOpen={() => handleOpen(item)}
         onShare={() => handleShare(item)}
         onRename={() => openRenameModal(item)}
+        onEdit={() => handleEdit(item)}
         onDelete={() => handleDelete(item)}
         onRemoveBroken={() => handleRemoveBroken(item)}
       />
     );
   }, [
     missingIds, filtered.length, player,
-    handleOpen, handleShare, openRenameModal, handleDelete, handleRemoveBroken,
+    handleOpen, handleShare, openRenameModal, handleEdit, handleDelete, handleRemoveBroken,
   ]);
 
   // ── render ───────────────────────────────────────────────────────────────────

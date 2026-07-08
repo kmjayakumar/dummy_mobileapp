@@ -286,6 +286,80 @@ export function getConverterOutputDir() {
   return OUTPUT_DIR;
 }
 
+/**
+ * POST /api/audio/edit → { success, editedPath: "/downloads/..._edited.wav" }
+ *
+ * Segment-based edit: uploads the local file fresh (the server copy from the
+ * original conversion is long gone by the time someone opens the editor),
+ * asks the server to keep only `segments` (already excludes anything the
+ * user deleted, and flags anything muted), and downloads the single
+ * resulting file, saved with an "edited_" prefix.
+ *
+ * @param {string} sourceUri - Local file:// URI of the file being edited
+ * @param {string} fileName  - Current file name (used for the output base name)
+ * @param {string} format    - 'wav' | 'mp3'
+ * @param {Array<{start:number,end:number,muted:boolean}>} segments - kept segments, in seconds
+ * @param {Function} [onProgress] - Progress callback (0-100)
+ */
+export async function editAudioSegments(sourceUri, fileName, format, segments, onProgress) {
+  await ensureOutputDir();
+
+  const fmt = format === 'mp3' ? 'mp3' : 'wav';
+  const baseName = `edited_${getBaseName(fileName)}_${getTimestamp()}`;
+  const outputUri = `${OUTPUT_DIR}${baseName}.${fmt}`;
+
+  const existing = await FileSystem.getInfoAsync(outputUri);
+  if (existing.exists) {
+    await FileSystem.deleteAsync(outputUri, { idempotent: true });
+  }
+
+  onProgress?.(5);
+
+  const uploadUri = await resolveUploadUri(sourceUri, fileName);
+  onProgress?.(10);
+
+  const authHeaders = await getAuthHeaders();
+  delete authHeaders['Content-Type'];
+
+  const mimeType = fmt === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+
+  const upload = await FileSystem.uploadAsync(
+    `${API_ROOT}/audio/edit`,
+    uploadUri,
+    {
+      httpMethod: 'POST',
+      uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+      fieldName: 'file',
+      mimeType,
+      parameters: {
+        format: fmt,
+        segments: JSON.stringify(segments),
+      },
+      headers: authHeaders,
+    }
+  );
+
+  onProgress?.(50);
+
+  if (upload.status < 200 || upload.status >= 300) {
+    throwHttpError(upload.status, upload.body, 'Audio edit failed');
+  }
+
+  const payload = parseJsonResponse(upload.body, 'Invalid response from edit server.');
+  const downloadUrl = payload.editedPath;
+  if (!downloadUrl) {
+    throw new Error('Server did not return editedPath for the edited file.');
+  }
+
+  const saved = await downloadToOutput(downloadUrl, outputUri, onProgress);
+  onProgress?.(100);
+
+  return {
+    ...saved,
+    fileName: `${baseName}.${fmt}`,
+  };
+}
+
 export async function clearConverterOutputs() {
   const info = await FileSystem.getInfoAsync(OUTPUT_DIR);
   if (info.exists) {
