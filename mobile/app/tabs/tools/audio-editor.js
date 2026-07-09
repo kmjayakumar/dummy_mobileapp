@@ -96,7 +96,7 @@ export default function AudioEditorScreen() {
           setProbeError('Could not read the audio duration.');
         } else {
           setDuration(dur);
-          setSegments([{ id: makeSegId(), start: 0, end: dur, volume: 1, deleted: false }]);
+          setSegments([{ id: makeSegId(), start: 0, end: dur, volume: 1, lastVolume: 1, deleted: false }]);
         }
       } catch (err) {
         if (mounted) setProbeError(err?.message || 'Could not open this audio file.');
@@ -161,19 +161,35 @@ export default function AudioEditorScreen() {
     }
 
     const point = currentSec;
-    const left  = { id: makeSegId(), start: segmentAtPlayhead.start, end: point, volume: segmentAtPlayhead.volume, deleted: false };
-    const right = { id: makeSegId(), start: point, end: segmentAtPlayhead.end, volume: segmentAtPlayhead.volume, deleted: false };
+    const left  = { id: makeSegId(), start: segmentAtPlayhead.start, end: point, volume: segmentAtPlayhead.volume, lastVolume: segmentAtPlayhead.lastVolume ?? 1, deleted: false };
+    const right = { id: makeSegId(), start: point, end: segmentAtPlayhead.end, volume: segmentAtPlayhead.volume, lastVolume: segmentAtPlayhead.lastVolume ?? 1, deleted: false };
 
     setSegments((prev) => prev.flatMap((s) => (s.id === segmentAtPlayhead.id ? [left, right] : [s])));
   }, [segmentAtPlayhead, canSplitHere, currentSec]);
 
   const setVolume = useCallback((id, value) => {
-    setSegments((prev) => prev.map((s) => (s.id === id ? { ...s, volume: value } : s)));
+    setSegments((prev) => prev.map((s) => (
+      s.id === id ? { ...s, volume: value, lastVolume: value > 0 ? value : s.lastVolume } : s
+    )));
+  }, []);
+
+  const toggleQuickMute = useCallback((id) => {
+    setSegments((prev) => prev.map((s) => {
+      if (s.id !== id) return s;
+      if (s.volume === 0) {
+        return { ...s, volume: s.lastVolume ?? 1 };
+      }
+      return { ...s, volume: 0, lastVolume: s.volume };
+    }));
   }, []);
 
   const toggleDelete = useCallback((id) => {
     setSegments((prev) => prev.map((s) => (s.id === id ? { ...s, deleted: !s.deleted } : s)));
   }, []);
+
+  const handlePreviewSegment = useCallback((seg) => {
+    player.playRange(fileUri, seg.start * 1000, seg.end * 1000);
+  }, [player, fileUri]);
 
   const handleReset = useCallback(() => {
     if (!duration) return;
@@ -183,7 +199,7 @@ export default function AudioEditorScreen() {
         text: 'Reset',
         style: 'destructive',
         onPress: () => {
-          setSegments([{ id: makeSegId(), start: 0, end: duration, volume: 1, deleted: false }]);
+          setSegments([{ id: makeSegId(), start: 0, end: duration, volume: 1, lastVolume: 1, deleted: false }]);
         },
       },
     ]);
@@ -260,10 +276,17 @@ export default function AudioEditorScreen() {
                 </TouchableOpacity>
               </View>
               <Text style={styles.sectionHint}>
-                Play or drag to the spot you want, then tap Split.
+                Play or drag to the spot you want, then tap Split. Tap the speed button to change playback speed.
               </Text>
 
-              <PlaybackBar player={player} uri={fileUri} color={Colors.primary} />
+              <PlaybackBar
+                player={player}
+                uri={fileUri}
+                color={Colors.primary}
+                size="large"
+                showSpeed
+                knownDurationMillis={duration * 1000}
+              />
 
               <Button
                 title={`Split here (${formatTime(currentSec)})`}
@@ -293,6 +316,18 @@ export default function AudioEditorScreen() {
                         Part {idx + 1} · {formatTime(seg.start)} – {formatTime(seg.end)}
                       </Text>
                       <TouchableOpacity
+                        onPress={() => handlePreviewSegment(seg)}
+                        disabled={seg.deleted}
+                        style={styles.segIconBtn}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <Ionicons
+                          name="play-circle-outline"
+                          size={20}
+                          color={seg.deleted ? Colors.textMuted : Colors.primary}
+                        />
+                      </TouchableOpacity>
+                      <TouchableOpacity
                         onPress={() => toggleDelete(seg.id)}
                         style={styles.segIconBtn}
                         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -306,11 +341,18 @@ export default function AudioEditorScreen() {
                     </View>
 
                     <View style={styles.volumeRow}>
-                      <Ionicons
-                        name={volumePct === 0 ? 'volume-mute' : volumePct < 100 ? 'volume-low-outline' : 'volume-high-outline'}
-                        size={16}
-                        color={seg.deleted ? Colors.textMuted : Colors.textSecondary}
-                      />
+                      <TouchableOpacity
+                        onPress={() => toggleQuickMute(seg.id)}
+                        disabled={seg.deleted}
+                        style={styles.muteBtn}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      >
+                        <Ionicons
+                          name={volumePct === 0 ? 'volume-mute' : volumePct < 100 ? 'volume-low-outline' : 'volume-high-outline'}
+                          size={18}
+                          color={seg.deleted ? Colors.textMuted : (volumePct === 0 ? Colors.error : Colors.textSecondary)}
+                        />
+                      </TouchableOpacity>
                       <Slider
                         style={styles.volumeSlider}
                         minimumValue={0}
@@ -391,6 +433,7 @@ const styles = StyleSheet.create({
   segIconBtn: { padding: 4 },
 
   volumeRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  muteBtn: { padding: 2 },
   volumeSlider: { flex: 1, height: 30 },
   volumeLabel: { fontSize: 11, color: Colors.textMuted, minWidth: 34, textAlign: 'right' },
 

@@ -12,16 +12,19 @@
  *
  * Usage:
  *   const player = useAudioPlayer();
- *   player.play(uri)            // play, or toggle pause/resume if already loaded
- *   player.seek(uri, ms)        // jump to an absolute position (loads file if needed)
- *   player.seekBy(uri, deltaMs) // relative jump, e.g. +10000 / -10000 for FF/RW
- *   player.stop(uri)            // stop + unload
+ *   player.play(uri)                     // play, or toggle pause/resume if already loaded
+ *   player.seek(uri, ms)                 // jump to an absolute position (loads file if needed)
+ *   player.seekBy(uri, deltaMs)          // relative jump, e.g. +10000 / -10000 for FF/RW
+ *   player.setRate(uri, rate)            // playback speed, e.g. 0.5 / 1 / 1.5 / 2
+ *   player.playRange(uri, startMs, endMs) // play only [start,end), auto-pausing at endMs
+ *   player.stop(uri)                     // stop + unload
  *
  *   player.playingUri     — uri of the currently loaded file (or null)
  *   player.isPlaying       — is it actively playing right now
  *   player.isLoading       — is a load in progress
  *   player.positionMillis  — current playback position (only meaningful while loaded)
  *   player.durationMillis  — total duration (only meaningful once loaded)
+ *   player.rate            — current playback speed multiplier (default 1)
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -29,6 +32,7 @@ import { Audio } from 'expo-av';
 
 let activeSound = null;
 let activeUri = null;
+let activeRangeEnd = null; // millis — if set, playback auto-pauses once position reaches this
 const listeners = new Set();
 
 function broadcast(update) {
@@ -43,7 +47,17 @@ function onStatusUpdate(uri, status) {
     isLoading: false,
     positionMillis: status.positionMillis || 0,
     durationMillis: status.durationMillis || 0,
+    rate: status.rate || 1,
   });
+
+  if (activeRangeEnd != null && status.positionMillis >= activeRangeEnd) {
+    activeRangeEnd = null;
+    if (activeSound) {
+      activeSound.pauseAsync().catch(() => {});
+    }
+    broadcast({ uri, isPlaying: false });
+  }
+
   if (status.didJustFinish) {
     unloadActive();
   }
@@ -54,6 +68,7 @@ async function unloadActive() {
   const uri = activeUri;
   activeSound = null;
   activeUri = null;
+  activeRangeEnd = null;
   if (sound) {
     try {
       await sound.stopAsync();
@@ -67,13 +82,13 @@ async function unloadActive() {
     }
   }
   if (uri) {
-    broadcast({ uri, isPlaying: false, isLoading: false, positionMillis: 0, durationMillis: 0 });
+    broadcast({ uri, isPlaying: false, isLoading: false, positionMillis: 0, durationMillis: 0, rate: 1 });
   }
 }
 
 /**
  * Loads `uri` fresh (unloading whatever was active first) and applies
- * `initialStatus` (e.g. { shouldPlay: true, positionMillis: 10000 }).
+ * `initialStatus` (e.g. { shouldPlay: true, positionMillis: 10000, rate: 1.5 }).
  */
 async function loadSound(uri, initialStatus) {
   await unloadActive();
@@ -83,18 +98,19 @@ async function loadSound(uri, initialStatus) {
     isLoading: true,
     positionMillis: initialStatus.positionMillis || 0,
     durationMillis: 0,
+    rate: initialStatus.rate || 1,
   });
 
   try {
     await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
     const { sound } = await Audio.Sound.createAsync(
       { uri },
-      initialStatus,
+      { shouldCorrectPitch: true, ...initialStatus },
       (status) => onStatusUpdate(uri, status)
     );
     activeSound = sound;
     activeUri = uri;
-    await sound.setProgressUpdateIntervalMillis(250);
+    await sound.setProgressUpdateIntervalMillis(200);
   } catch (err) {
     broadcast({ uri, isPlaying: false, isLoading: false });
     throw err;
@@ -108,6 +124,7 @@ export function useAudioPlayer() {
     isLoading: false,
     positionMillis: 0,
     durationMillis: 0,
+    rate: 1,
   });
 
   useEffect(() => {
@@ -121,6 +138,7 @@ export function useAudioPlayer() {
   /** Play `uri`. If it's already loaded, this toggles pause/resume instead. */
   const play = useCallback(async (uri) => {
     if (!uri) return;
+    activeRangeEnd = null;
 
     if (activeUri === uri && activeSound) {
       try {
@@ -145,6 +163,7 @@ export function useAudioPlayer() {
   /** Jump to an absolute position in milliseconds. Loads the file first if needed. */
   const seek = useCallback(async (uri, positionMillis) => {
     if (!uri) return;
+    activeRangeEnd = null;
     const target = Math.max(0, Math.round(positionMillis));
 
     if (activeUri === uri && activeSound) {
@@ -163,6 +182,7 @@ export function useAudioPlayer() {
   /** Relative jump — positive to fast-forward, negative to rewind. */
   const seekBy = useCallback(async (uri, deltaMillis) => {
     if (!uri) return;
+    activeRangeEnd = null;
 
     if (activeUri === uri && activeSound) {
       try {
@@ -183,6 +203,47 @@ export function useAudioPlayer() {
     await loadSound(uri, { shouldPlay: true, positionMillis: start });
   }, []);
 
+  /** Set playback speed, e.g. 0.5 / 1 / 1.5 / 2. Loads the file (paused) if needed. */
+  const setRate = useCallback(async (uri, rate) => {
+    if (!uri) return;
+
+    if (activeUri === uri && activeSound) {
+      try {
+        await activeSound.setRateAsync(rate, true);
+        broadcast({ uri, rate });
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    await loadSound(uri, { shouldPlay: false, rate });
+  }, []);
+
+  /**
+   * Play only the [startMillis, endMillis) window, auto-pausing once it's
+   * reached. Always restarts from startMillis, even if already playing.
+   * Used to preview a single edited segment before saving.
+   */
+  const playRange = useCallback(async (uri, startMillis, endMillis) => {
+    if (!uri) return;
+    activeRangeEnd = Math.max(0, endMillis);
+    const start = Math.max(0, startMillis);
+
+    if (activeUri === uri && activeSound) {
+      try {
+        await activeSound.setPositionAsync(start);
+        await activeSound.playAsync();
+        broadcast({ uri, isPlaying: true, positionMillis: start });
+      } catch {
+        await loadSound(uri, { shouldPlay: true, positionMillis: start });
+      }
+      return;
+    }
+
+    await loadSound(uri, { shouldPlay: true, positionMillis: start });
+  }, []);
+
   const stop = useCallback(async (uri) => {
     if (!uri || activeUri === uri) {
       await unloadActive();
@@ -195,9 +256,12 @@ export function useAudioPlayer() {
     isLoading: state.isLoading,
     positionMillis: state.positionMillis,
     durationMillis: state.durationMillis,
+    rate: state.rate,
     play,
     seek,
     seekBy,
+    setRate,
+    playRange,
     stop,
   };
 }
