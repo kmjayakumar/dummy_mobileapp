@@ -200,7 +200,8 @@ router.post('/wav-to-mp3', async (req, res) => {
 /**
  * Builds an ffmpeg filter_complex graph that:
  *  - trims out each kept segment (asetpts resets each segment's own timeline)
- *  - applies volume=0 to segments marked muted (silenced but kept in place)
+ *  - applies a volume level (0.0-1.5) to each segment — 0 is silent, 1 is
+ *    original volume, up to 1.5 boosts it — kept in place either way
  *  - concatenates everything back together in order
  *
  * `segments` is already the final "keep" list — deleted segments are simply
@@ -212,7 +213,7 @@ function buildEditFilter(segments) {
     const label = `a${i}`;
     labels.push(`[${label}]`);
     const trim = `[0:a]atrim=start=${seg.start.toFixed(3)}:end=${seg.end.toFixed(3)},asetpts=PTS-STARTPTS`;
-    return seg.muted ? `${trim},volume=0[${label}]` : `${trim}[${label}]`;
+    return `${trim},volume=${seg.volume.toFixed(2)}[${label}]`;
   });
   const concat = `${labels.join('')}concat=n=${segments.length}:v=0:a=1[outa]`;
   return `${parts.join('; ')}; ${concat}`;
@@ -221,7 +222,8 @@ function buildEditFilter(segments) {
 // POST /api/audio/edit
 // Segment-based editor: split/trim/mute, rendered into ONE new file.
 // Body (multipart): file=<wav|mp3>, format='wav'|'mp3', segments=JSON string
-//   of the KEPT segments only: [{ start, end, muted }, ...] in seconds.
+//   of the KEPT segments only: [{ start, end, volume }, ...] in seconds,
+//   volume as a 0.0-1.5 multiplier (0 = silent, 1 = original, 1.5 = boosted).
 router.post(
   '/edit',
   (req, _res, next) => {
@@ -254,7 +256,7 @@ router.post(
         .map((s) => ({
           start: Math.max(0, Number(s.start)),
           end: Math.max(0, Number(s.end)),
-          muted: Boolean(s.muted),
+          volume: Number.isFinite(Number(s.volume)) ? Math.min(1.5, Math.max(0, Number(s.volume))) : 1,
         }))
         .filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end - s.start > 0.01);
 

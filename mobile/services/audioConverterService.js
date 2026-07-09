@@ -292,13 +292,13 @@ export function getConverterOutputDir() {
  * Segment-based edit: uploads the local file fresh (the server copy from the
  * original conversion is long gone by the time someone opens the editor),
  * asks the server to keep only `segments` (already excludes anything the
- * user deleted, and flags anything muted), and downloads the single
- * resulting file, saved with an "edited_" prefix.
+ * user deleted, and carries each part's volume level), and downloads the
+ * single resulting file, saved with an "edited_" prefix.
  *
  * @param {string} sourceUri - Local file:// URI of the file being edited
  * @param {string} fileName  - Current file name (used for the output base name)
  * @param {string} format    - 'wav' | 'mp3'
- * @param {Array<{start:number,end:number,muted:boolean}>} segments - kept segments, in seconds
+ * @param {Array<{start:number,end:number,volume:number}>} segments - kept segments, in seconds; volume is a 0.0-1.5 multiplier
  * @param {Function} [onProgress] - Progress callback (0-100)
  */
 export async function editAudioSegments(sourceUri, fileName, format, segments, onProgress) {

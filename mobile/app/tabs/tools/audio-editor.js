@@ -4,13 +4,15 @@
  * Segment-based editor for a single converted file (WAV or MP3), reached via
  * the "Edit" button on Converted Files.
  *
- * Model: the file starts as ONE segment. Tapping "Split" cuts the selected
- * segment into two at a chosen point. Each segment can then be muted
- * (silenced but kept in place) or deleted (removed, closing the gap).
- * Trimming the start/end is just splitting near that edge and deleting the
- * small leftover piece — no separate trim tool needed.
+ * Model: the file starts as ONE part. Play/scrub the ORIGINAL audio on the
+ * single timeline below — wherever the playhead currently sits is where
+ * "Split here" will cut. Each resulting part has its own volume (0-150%,
+ * 0 = silent) and can be deleted (removed, closing the gap) or restored.
  *
- * "Save" sends only the kept segments (with their mute flags) to the server,
+ * There's no separate "trim" tool — trimming the start/end is just splitting
+ * near that edge and deleting the small leftover piece.
+ *
+ * "Save" sends only the kept parts (with their volume levels) to the server,
  * which renders them into ONE new file, downloaded locally with an
  * "edited_" filename prefix and added to conversion history.
  */
@@ -40,6 +42,7 @@ import { editAudioSegments } from '../../../services/audioConverterService';
 import { saveConversion } from '../../../services/conversionHistoryService';
 
 const MIN_SEGMENT_SEC = 0.5;
+const EDGE_GUARD_SEC = 0.05; // how close to a boundary counts as "no real cut"
 
 let segCounter = 0;
 function makeSegId() {
@@ -69,8 +72,6 @@ export default function AudioEditorScreen() {
   const [probeError, setProbeError] = useState('');
 
   const [segments, setSegments]     = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
-  const [splitAt, setSplitAt]       = useState(0);
 
   const [saving, setSaving]         = useState(false);
   const [saveProgress, setSaveProgress] = useState(0);
@@ -95,10 +96,7 @@ export default function AudioEditorScreen() {
           setProbeError('Could not read the audio duration.');
         } else {
           setDuration(dur);
-          const initial = { id: makeSegId(), start: 0, end: dur, muted: false, deleted: false };
-          setSegments([initial]);
-          setSelectedId(initial.id);
-          setSplitAt(dur / 2);
+          setSegments([{ id: makeSegId(), start: 0, end: dur, volume: 1, deleted: false }]);
         }
       } catch (err) {
         if (mounted) setProbeError(err?.message || 'Could not open this audio file.');
@@ -112,21 +110,18 @@ export default function AudioEditorScreen() {
     return () => { mounted = false; };
   }, [fileUri]);
 
+  // ── the one timeline: current playhead position on the ORIGINAL audio ──────
+  // player is the same shared singleton PlaybackBar below reads from, so this
+  // stays in sync with whatever the user is dragging/playing.
+  const isLoadedHere = player.playingUri === fileUri;
+  const currentSec = isLoadedHere ? (player.positionMillis || 0) / 1000 : 0;
+
   // ── derived state ────────────────────────────────────────────────────────────
 
   const orderedSegments = useMemo(
     () => [...segments].sort((a, b) => a.start - b.start),
     [segments]
   );
-
-  const selectedSegment = useMemo(
-    () => segments.find((s) => s.id === selectedId) || null,
-    [segments, selectedId]
-  );
-
-  const canSplit = !!selectedSegment
-    && !selectedSegment.deleted
-    && (selectedSegment.end - selectedSegment.start) > MIN_SEGMENT_SEC * 2;
 
   const keptSegments = useMemo(
     () => orderedSegments.filter((s) => !s.deleted),
@@ -138,53 +133,57 @@ export default function AudioEditorScreen() {
     [keptSegments]
   );
 
-  // Keep the split slider's value sensible whenever the selected segment changes.
-  useEffect(() => {
-    if (!selectedSegment) return;
-    const mid = (selectedSegment.start + selectedSegment.end) / 2;
-    setSplitAt(mid);
-  }, [selectedSegment?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const segmentAtPlayhead = useMemo(
+    () => orderedSegments.find((s) => currentSec >= s.start && currentSec < s.end) || null,
+    [orderedSegments, currentSec]
+  );
+
+  const canSplitHere = !!segmentAtPlayhead
+    && !segmentAtPlayhead.deleted
+    && (segmentAtPlayhead.end - segmentAtPlayhead.start) > MIN_SEGMENT_SEC * 2
+    && (currentSec - segmentAtPlayhead.start) > EDGE_GUARD_SEC
+    && (segmentAtPlayhead.end - currentSec) > EDGE_GUARD_SEC;
 
   // ── actions ──────────────────────────────────────────────────────────────────
 
-  const selectSegment = useCallback((seg) => {
-    if (seg.deleted) return;
-    setSelectedId(seg.id);
-  }, []);
+  const handleSplitHere = useCallback(() => {
+    if (!segmentAtPlayhead) {
+      Alert.alert('Nothing to split', 'Play or drag the timeline to a position first.');
+      return;
+    }
+    if (segmentAtPlayhead.deleted) {
+      Alert.alert('That part is deleted', 'Restore it first if you want to split it.');
+      return;
+    }
+    if (!canSplitHere) {
+      Alert.alert('Too close to an edge', 'Move the playhead a bit further into this part.');
+      return;
+    }
 
-  const handleSplit = useCallback(() => {
-    if (!selectedSegment || !canSplit) return;
-    const point = Math.min(
-      Math.max(splitAt, selectedSegment.start + MIN_SEGMENT_SEC),
-      selectedSegment.end - MIN_SEGMENT_SEC
-    );
-    const left  = { id: makeSegId(), start: selectedSegment.start, end: point, muted: selectedSegment.muted, deleted: false };
-    const right = { id: makeSegId(), start: point, end: selectedSegment.end, muted: selectedSegment.muted, deleted: false };
+    const point = currentSec;
+    const left  = { id: makeSegId(), start: segmentAtPlayhead.start, end: point, volume: segmentAtPlayhead.volume, deleted: false };
+    const right = { id: makeSegId(), start: point, end: segmentAtPlayhead.end, volume: segmentAtPlayhead.volume, deleted: false };
 
-    setSegments((prev) => prev.flatMap((s) => (s.id === selectedSegment.id ? [left, right] : [s])));
-    setSelectedId(left.id);
-  }, [selectedSegment, canSplit, splitAt]);
+    setSegments((prev) => prev.flatMap((s) => (s.id === segmentAtPlayhead.id ? [left, right] : [s])));
+  }, [segmentAtPlayhead, canSplitHere, currentSec]);
 
-  const toggleMute = useCallback((id) => {
-    setSegments((prev) => prev.map((s) => (s.id === id ? { ...s, muted: !s.muted } : s)));
+  const setVolume = useCallback((id, value) => {
+    setSegments((prev) => prev.map((s) => (s.id === id ? { ...s, volume: value } : s)));
   }, []);
 
   const toggleDelete = useCallback((id) => {
     setSegments((prev) => prev.map((s) => (s.id === id ? { ...s, deleted: !s.deleted } : s)));
-    setSelectedId((current) => (current === id ? null : current));
   }, []);
 
   const handleReset = useCallback(() => {
     if (!duration) return;
-    Alert.alert('Start over?', 'This discards every split, mute, and delete you made.', [
+    Alert.alert('Start over?', 'This discards every split, volume change, and delete you made.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Reset',
         style: 'destructive',
         onPress: () => {
-          const initial = { id: makeSegId(), start: 0, end: duration, muted: false, deleted: false };
-          setSegments([initial]);
-          setSelectedId(initial.id);
+          setSegments([{ id: makeSegId(), start: 0, end: duration, volume: 1, deleted: false }]);
         },
       },
     ]);
@@ -206,7 +205,7 @@ export default function AudioEditorScreen() {
       const payloadSegments = keptSegments.map((s) => ({
         start: s.start,
         end: s.end,
-        muted: s.muted,
+        volume: s.volume,
       }));
 
       const result = await editAudioSegments(fileUri, fileName, format, payloadSegments, setSaveProgress);
@@ -252,114 +251,47 @@ export default function AudioEditorScreen() {
           </Card>
         ) : (
           <>
-            {/* Preview */}
-            <Card style={styles.section}>
-              <Text style={styles.sectionTitle}>Preview original</Text>
-              <PlaybackBar player={player} uri={fileUri} color={Colors.primary} />
-            </Card>
-
-            {/* Split control */}
+            {/* One timeline — play, drag, and split all happen here */}
             <Card style={styles.section}>
               <View style={styles.rowBetween}>
-                <Text style={styles.sectionTitle}>Split</Text>
+                <Text style={styles.sectionTitle}>Timeline</Text>
                 <TouchableOpacity onPress={handleReset} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                   <Text style={styles.resetLink}>Reset all</Text>
                 </TouchableOpacity>
               </View>
-
-              {selectedSegment ? (
-                <>
-                  <Text style={styles.sectionHint}>
-                    Selected part: {formatTime(selectedSegment.start)} – {formatTime(selectedSegment.end)}
-                  </Text>
-                  <View style={styles.sliderRow}>
-                    <Text style={styles.timeLabel}>{formatTime(selectedSegment.start)}</Text>
-                    <Slider
-                      style={styles.slider}
-                      minimumValue={selectedSegment.start + MIN_SEGMENT_SEC}
-                      maximumValue={Math.max(selectedSegment.end - MIN_SEGMENT_SEC, selectedSegment.start + MIN_SEGMENT_SEC)}
-                      value={splitAt}
-                      minimumTrackTintColor={Colors.primary}
-                      maximumTrackTintColor={Colors.border}
-                      thumbTintColor={Colors.primary}
-                      disabled={!canSplit}
-                      onValueChange={setSplitAt}
-                    />
-                    <Text style={styles.timeLabel}>{formatTime(selectedSegment.end)}</Text>
-                  </View>
-                  <Text style={styles.splitPreview}>Split at {formatTime(splitAt)}</Text>
-                  <Button
-                    title="Split here"
-                    onPress={handleSplit}
-                    disabled={!canSplit}
-                    size="sm"
-                  />
-                  {!canSplit && selectedSegment ? (
-                    <Text style={styles.tinyHint}>This part is too short to split further.</Text>
-                  ) : null}
-                </>
-              ) : (
-                <Text style={styles.sectionHint}>Tap a part below to select it for splitting.</Text>
-              )}
-
-              <Text style={styles.tinyHint}>
-                Tip: to trim the start or end, split near that edge, then delete the small piece.
+              <Text style={styles.sectionHint}>
+                Play or drag to the spot you want, then tap Split.
               </Text>
+
+              <PlaybackBar player={player} uri={fileUri} color={Colors.primary} />
+
+              <Button
+                title={`Split here (${formatTime(currentSec)})`}
+                onPress={handleSplitHere}
+                disabled={!canSplitHere}
+                size="sm"
+              />
             </Card>
 
-            {/* Segments list */}
+            {/* Parts list */}
             <Card style={styles.section}>
               <Text style={styles.sectionTitle}>Parts ({orderedSegments.length})</Text>
               {orderedSegments.map((seg, idx) => {
-                const isSelected = seg.id === selectedId;
+                const isAtPlayhead = segmentAtPlayhead?.id === seg.id;
+                const volumePct = Math.round(seg.volume * 100);
                 return (
-                  <TouchableOpacity
+                  <View
                     key={seg.id}
                     style={[
                       styles.segmentRow,
-                      isSelected && styles.segmentRowSelected,
+                      isAtPlayhead && !seg.deleted && styles.segmentRowActive,
                       seg.deleted && styles.segmentRowDeleted,
                     ]}
-                    onPress={() => selectSegment(seg)}
-                    activeOpacity={seg.deleted ? 1 : 0.7}
                   >
-                    <View style={styles.segmentInfo}>
+                    <View style={styles.segmentTopRow}>
                       <Text style={styles.segmentTitle}>
                         Part {idx + 1} · {formatTime(seg.start)} – {formatTime(seg.end)}
                       </Text>
-                      <View style={styles.badgeRow}>
-                        {seg.deleted ? (
-                          <View style={[styles.badge, styles.badgeDeleted]}>
-                            <Text style={styles.badgeTextDeleted}>Deleted</Text>
-                          </View>
-                        ) : seg.muted ? (
-                          <View style={[styles.badge, styles.badgeMuted]}>
-                            <Text style={styles.badgeTextMuted}>Muted</Text>
-                          </View>
-                        ) : (
-                          <View style={[styles.badge, styles.badgeKept]}>
-                            <Text style={styles.badgeTextKept}>Kept</Text>
-                          </View>
-                        )}
-                        <Text style={styles.segmentDuration}>
-                          {formatTime(seg.end - seg.start)}
-                        </Text>
-                      </View>
-                    </View>
-
-                    <View style={styles.segmentActions}>
-                      <TouchableOpacity
-                        onPress={() => toggleMute(seg.id)}
-                        disabled={seg.deleted}
-                        style={styles.segIconBtn}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      >
-                        <Ionicons
-                          name={seg.muted ? 'volume-mute' : 'volume-high-outline'}
-                          size={18}
-                          color={seg.deleted ? Colors.textMuted : (seg.muted ? Colors.warning : Colors.textSecondary)}
-                        />
-                      </TouchableOpacity>
                       <TouchableOpacity
                         onPress={() => toggleDelete(seg.id)}
                         style={styles.segIconBtn}
@@ -372,7 +304,28 @@ export default function AudioEditorScreen() {
                         />
                       </TouchableOpacity>
                     </View>
-                  </TouchableOpacity>
+
+                    <View style={styles.volumeRow}>
+                      <Ionicons
+                        name={volumePct === 0 ? 'volume-mute' : volumePct < 100 ? 'volume-low-outline' : 'volume-high-outline'}
+                        size={16}
+                        color={seg.deleted ? Colors.textMuted : Colors.textSecondary}
+                      />
+                      <Slider
+                        style={styles.volumeSlider}
+                        minimumValue={0}
+                        maximumValue={1.5}
+                        step={0.05}
+                        value={seg.volume}
+                        minimumTrackTintColor={Colors.primary}
+                        maximumTrackTintColor={Colors.border}
+                        thumbTintColor={Colors.primary}
+                        disabled={seg.deleted}
+                        onValueChange={(v) => setVolume(seg.id, v)}
+                      />
+                      <Text style={styles.volumeLabel}>{volumePct}%</Text>
+                    </View>
+                  </View>
                 );
               })}
             </Card>
@@ -422,38 +375,24 @@ const styles = StyleSheet.create({
   rowBetween: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   resetLink: { fontSize: 12, fontWeight: '600', color: Colors.error },
 
-  sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  slider: { flex: 1, height: 32 },
-  timeLabel: { fontSize: 11, color: Colors.textMuted, minWidth: 34, textAlign: 'center' },
-  splitPreview: { fontSize: 13, fontWeight: '600', color: Colors.primary, textAlign: 'center' },
-  tinyHint: { fontSize: 11, color: Colors.textMuted, lineHeight: 15, marginTop: 4 },
-
   segmentRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
     borderWidth: 1.5,
     borderColor: Colors.border,
     borderRadius: 12,
     paddingVertical: 10,
     paddingHorizontal: 12,
     marginTop: 8,
+    gap: 6,
   },
-  segmentRowSelected: { borderColor: Colors.primary },
+  segmentRowActive: { borderColor: Colors.primary },
   segmentRowDeleted: { opacity: 0.5, borderStyle: 'dashed' },
-  segmentInfo: { flex: 1, gap: 4 },
+  segmentTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   segmentTitle: { fontSize: 13, fontWeight: '600', color: Colors.text },
-  badgeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  badge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5 },
-  badgeKept: { backgroundColor: Colors.success + '20' },
-  badgeTextKept: { fontSize: 10, fontWeight: '700', color: Colors.success },
-  badgeMuted: { backgroundColor: Colors.warning + '20' },
-  badgeTextMuted: { fontSize: 10, fontWeight: '700', color: Colors.warning },
-  badgeDeleted: { backgroundColor: Colors.error + '20' },
-  badgeTextDeleted: { fontSize: 10, fontWeight: '700', color: Colors.error },
-  segmentDuration: { fontSize: 11, color: Colors.textMuted },
-  segmentActions: { flexDirection: 'row', gap: 10, marginLeft: 8 },
   segIconBtn: { padding: 4 },
+
+  volumeRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  volumeSlider: { flex: 1, height: 30 },
+  volumeLabel: { fontSize: 11, color: Colors.textMuted, minWidth: 34, textAlign: 'right' },
 
   progressTrack: {
     height: 6,
