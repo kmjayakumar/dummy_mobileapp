@@ -80,6 +80,9 @@ export default function ConverterScreen() {
 
   const router = useRouter();
   const player = useAudioPlayer();
+  // Disabled while dragging an output row's scrub bar — otherwise the
+  // ScrollView steals the horizontal drag gesture and the slider never moves.
+  const [scrollEnabled, setScrollEnabled] = useState(true);
 
   // Tracks the staged URI for the current shared file so we can delete it
   // from cache/share_staging/ after conversion or when the user cancels.
@@ -452,6 +455,7 @@ export default function ConverterScreen() {
         style={styles.scroll}
         contentContainerStyle={styles.container}
         showsVerticalScrollIndicator={false}
+        scrollEnabled={scrollEnabled}
       >
         {/* ── Header ── */}
         <View style={styles.header}>
@@ -645,6 +649,8 @@ export default function ConverterScreen() {
                   last={!mp3Output}
                   player={player}
                   uri={wavOutput.uri}
+                  onDragStart={() => setScrollEnabled(false)}
+                  onDragEnd={() => setScrollEnabled(true)}
                   onShare={() => shareOutputFile('wav')}
                   onRename={() => openRenameModal('wav')}
                   onDelete={() => deleteOutputFile('wav')}
@@ -662,6 +668,8 @@ export default function ConverterScreen() {
                   last
                   player={player}
                   uri={mp3Output.uri}
+                  onDragStart={() => setScrollEnabled(false)}
+                  onDragEnd={() => setScrollEnabled(true)}
                   onShare={() => shareOutputFile('mp3')}
                   onRename={() => openRenameModal('mp3')}
                   onDelete={() => deleteOutputFile('mp3')}
@@ -737,7 +745,7 @@ export default function ConverterScreen() {
 
 const OutputRow = React.memo(function OutputRow({
   icon, label, fileName, path, color, last,
-  player, uri,
+  player, uri, onDragStart, onDragEnd,
   onShare, onRename, onDelete, actionsDisabled,
 }) {
   return (
@@ -750,7 +758,14 @@ const OutputRow = React.memo(function OutputRow({
       <Text style={styles.outputPathLabel}>Full path on phone</Text>
       <Text style={styles.outputPath} selectable>{path}</Text>
 
-      <PlaybackBar player={player} uri={uri} color={color} disabled={actionsDisabled} />
+      <PlaybackBar
+        player={player}
+        uri={uri}
+        color={color}
+        disabled={actionsDisabled}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+      />
 
       <View style={styles.outputActions}>
         <TouchableOpacity onPress={onShare}  disabled={actionsDisabled} style={styles.iconBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>

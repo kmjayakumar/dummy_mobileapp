@@ -74,6 +74,8 @@ const FileItem = React.memo(function FileItem({
   isMissing,
   isLast,
   player,
+  onDragStart,
+  onDragEnd,
   onOpen,
   onShare,
   onRename,
@@ -114,7 +116,14 @@ const FileItem = React.memo(function FileItem({
             <Text style={styles.missingText}>File missing — tap to remove</Text>
           </TouchableOpacity>
         ) : (
-          <PlaybackBar player={player} uri={item.fileUri} color={accentColor} disabled={isMissing} />
+          <PlaybackBar
+            player={player}
+            uri={item.fileUri}
+            color={accentColor}
+            disabled={isMissing}
+            onDragStart={onDragStart}
+            onDragEnd={onDragEnd}
+          />
         )}
 
         <View style={styles.actions}>
@@ -146,6 +155,9 @@ export default function ConvertedFilesScreen() {
   const [renameError, setRenameError]     = useState('');
 
   const player = useAudioPlayer();
+  // Disabled while dragging a row's scrub bar — otherwise the FlatList steals
+  // the horizontal drag gesture and the slider never moves.
+  const [scrollEnabled, setScrollEnabled] = useState(true);
 
   // ── data loading ────────────────────────────────────────────────────────────
 
@@ -327,6 +339,8 @@ export default function ConvertedFilesScreen() {
         isMissing={isMissing}
         isLast={isLast}
         player={player}
+        onDragStart={() => setScrollEnabled(false)}
+        onDragEnd={() => setScrollEnabled(true)}
         onOpen={() => handleOpen(item)}
         onShare={() => handleShare(item)}
         onRename={() => openRenameModal(item)}
@@ -393,6 +407,7 @@ export default function ConvertedFilesScreen() {
           initialNumToRender={10}
           maxToRenderPerBatch={10}
           windowSize={5}
+          scrollEnabled={scrollEnabled}
         />
       )}
 

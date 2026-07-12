@@ -299,9 +299,14 @@ export function getConverterOutputDir() {
  * @param {string} fileName  - Current file name (used for the output base name)
  * @param {string} format    - 'wav' | 'mp3'
  * @param {Array<{start:number,end:number,volume:number}>} segments - kept segments, in seconds; volume is a 0.0-1.5 multiplier
+ * @param {Object} [options]
+ * @param {'original'|'child'|'woman'|'man'} [options.voicePreset] - pitch-shift preset; omit/'original' for no change
+ * @param {boolean} [options.reduceNoise] - run the result through a noise-reduction filter
  * @param {Function} [onProgress] - Progress callback (0-100)
  */
-export async function editAudioSegments(sourceUri, fileName, format, segments, onProgress) {
+export async function editAudioSegments(sourceUri, fileName, format, segments, options, onProgress) {
+  const { voicePreset = 'original', reduceNoise = false } = options || {};
+
   await ensureOutputDir();
 
   const fmt = format === 'mp3' ? 'mp3' : 'wav';
@@ -334,6 +339,8 @@ export async function editAudioSegments(sourceUri, fileName, format, segments, o
       parameters: {
         format: fmt,
         segments: JSON.stringify(segments),
+        voicePreset,
+        reduceNoise: String(reduceNoise),
       },
       headers: authHeaders,
     }

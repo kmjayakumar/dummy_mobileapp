@@ -197,17 +197,43 @@ router.post('/wav-to-mp3', async (req, res) => {
   }
 });
 
+const VOICE_PITCH_FACTOR = {
+  child: 1.35,
+  woman: 1.15,
+  man: 0.85,
+};
+
+/** Reads the audio stream's sample rate via ffprobe; falls back to 44100 if unknown. */
+async function probeSampleRate(inputPath) {
+  try {
+    const { stdout } = await execAsync(
+      `ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "${inputPath}"`,
+      { cwd: BACKEND_ROOT }
+    );
+    const sr = parseInt(String(stdout).trim(), 10);
+    return Number.isFinite(sr) && sr > 0 ? sr : 44100;
+  } catch {
+    return 44100;
+  }
+}
+
 /**
  * Builds an ffmpeg filter_complex graph that:
  *  - trims out each kept segment (asetpts resets each segment's own timeline)
  *  - applies a volume level (0.0-1.5) to each segment — 0 is silent, 1 is
  *    original volume, up to 1.5 boosts it — kept in place either way
  *  - concatenates everything back together in order
+ *  - optionally runs the result through a noise-reduction filter (afftdn)
+ *  - optionally pitch-shifts the result for a Child/Woman/Man voice preset,
+ *    using asetrate+aresample+atempo (pitch changes without changing speed) —
+ *    standard ffmpeg filters, no extra models/plugins required
  *
  * `segments` is already the final "keep" list — deleted segments are simply
  * absent from the array, so the gap they left closes naturally on concat.
+ *
+ * Returns { graph, finalLabel } — pass finalLabel to `-map "[<finalLabel>]"`.
  */
-function buildEditFilter(segments) {
+function buildEditFilter(segments, { reduceNoise, voicePreset, sampleRate } = {}) {
   const labels = [];
   const parts = segments.map((seg, i) => {
     const label = `a${i}`;
@@ -216,7 +242,27 @@ function buildEditFilter(segments) {
     return `${trim},volume=${seg.volume.toFixed(2)}[${label}]`;
   });
   const concat = `${labels.join('')}concat=n=${segments.length}:v=0:a=1[outa]`;
-  return `${parts.join('; ')}; ${concat}`;
+
+  const chain = [...parts, concat];
+  let finalLabel = 'outa';
+
+  if (reduceNoise) {
+    const nextLabel = 'denoised';
+    chain.push(`[${finalLabel}]afftdn=nf=-25[${nextLabel}]`);
+    finalLabel = nextLabel;
+  }
+
+  const factor = VOICE_PITCH_FACTOR[voicePreset];
+  if (factor) {
+    const sr = sampleRate || 44100;
+    const newRate = Math.round(sr * factor);
+    const atempo = (1 / factor).toFixed(4);
+    const nextLabel = 'voiced';
+    chain.push(`[${finalLabel}]asetrate=${newRate},aresample=${sr},atempo=${atempo}[${nextLabel}]`);
+    finalLabel = nextLabel;
+  }
+
+  return { graph: chain.join('; '), finalLabel };
 }
 
 // POST /api/audio/edit
@@ -224,6 +270,7 @@ function buildEditFilter(segments) {
 // Body (multipart): file=<wav|mp3>, format='wav'|'mp3', segments=JSON string
 //   of the KEPT segments only: [{ start, end, volume }, ...] in seconds,
 //   volume as a 0.0-1.5 multiplier (0 = silent, 1 = original, 1.5 = boosted).
+//   Optional: reduceNoise='true'|'false', voicePreset='original'|'child'|'woman'|'man'.
 router.post(
   '/edit',
   (req, _res, next) => {
@@ -240,6 +287,9 @@ router.post(
 
       const stamp = req.editStamp || makeTimestamp();
       const format = (req.body.format || '').toLowerCase() === 'mp3' ? 'mp3' : 'wav';
+      const reduceNoise = req.body.reduceNoise === 'true' || req.body.reduceNoise === true;
+      const voicePresetRaw = (req.body.voicePreset || '').toLowerCase();
+      const voicePreset = ['child', 'woman', 'man'].includes(voicePresetRaw) ? voicePresetRaw : null;
 
       let rawSegments;
       try {
@@ -269,15 +319,18 @@ router.post(
         stamp,
         format,
         segmentCount: segments.length,
+        reduceNoise,
+        voicePreset: voicePreset || 'original',
       });
 
       const inputPath = req.file.path;
       const outputPath = path.join(OUTPUTS_DIR, `${stamp}_edited.${format}`);
       const outputDownload = `/downloads/${stamp}_edited.${format}`;
 
-      const filterComplex = buildEditFilter(segments);
+      const sampleRate = voicePreset ? await probeSampleRate(inputPath) : null;
+      const { graph, finalLabel } = buildEditFilter(segments, { reduceNoise, voicePreset, sampleRate });
       const codecArgs = format === 'mp3' ? '-b:a 192k' : '';
-      const command = `ffmpeg -y -i "${inputPath}" -filter_complex "${filterComplex}" -map "[outa]" ${codecArgs} "${outputPath}"`;
+      const command = `ffmpeg -y -i "${inputPath}" -filter_complex "${graph}" -map "[${finalLabel}]" ${codecArgs} "${outputPath}"`;
 
       await runFfmpeg(command, 'edit');
 

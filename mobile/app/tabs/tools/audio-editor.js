@@ -26,6 +26,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -43,6 +44,13 @@ import { saveConversion } from '../../../services/conversionHistoryService';
 
 const MIN_SEGMENT_SEC = 0.5;
 const EDGE_GUARD_SEC = 0.05; // how close to a boundary counts as "no real cut"
+
+const VOICE_OPTIONS = [
+  { value: 'original', label: 'Original' },
+  { value: 'child', label: 'Child' },
+  { value: 'woman', label: 'Woman' },
+  { value: 'man', label: 'Man' },
+];
 
 let segCounter = 0;
 function makeSegId() {
@@ -73,9 +81,16 @@ export default function AudioEditorScreen() {
 
   const [segments, setSegments]     = useState([]);
 
+  const [voicePreset, setVoicePreset] = useState('original'); // 'original' | 'child' | 'woman' | 'man'
+  const [reduceNoise, setReduceNoise] = useState(false);
+
   const [saving, setSaving]         = useState(false);
   const [saveProgress, setSaveProgress] = useState(0);
   const [saveError, setSaveError]   = useState('');
+
+  // Disabled while dragging the timeline slider — otherwise the ScrollView
+  // steals the horizontal drag gesture and the slider never moves.
+  const [scrollEnabled, setScrollEnabled] = useState(true);
 
   // ── probe duration on mount ─────────────────────────────────────────────────
   useEffect(() => {
@@ -224,7 +239,11 @@ export default function AudioEditorScreen() {
         volume: s.volume,
       }));
 
-      const result = await editAudioSegments(fileUri, fileName, format, payloadSegments, setSaveProgress);
+      const result = await editAudioSegments(
+        fileUri, fileName, format, payloadSegments,
+        { voicePreset, reduceNoise },
+        setSaveProgress
+      );
       await saveConversion({ fileName: result.fileName, fileUri: result.uri, format, size: result.size });
 
       Alert.alert('Saved', `Saved as a new file: ${result.fileName}`, [
@@ -235,13 +254,17 @@ export default function AudioEditorScreen() {
     } finally {
       setSaving(false);
     }
-  }, [keptSegments, player, fileUri, fileName, format, router]);
+  }, [keptSegments, player, fileUri, fileName, format, voicePreset, reduceNoise, router]);
 
   // ── render ───────────────────────────────────────────────────────────────────
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['bottom']}>
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        keyboardShouldPersistTaps="handled"
+        scrollEnabled={scrollEnabled}
+      >
 
         {/* File info */}
         <Card style={styles.section}>
@@ -286,6 +309,8 @@ export default function AudioEditorScreen() {
                 size="large"
                 showSpeed
                 knownDurationMillis={duration * 1000}
+                onDragStart={() => setScrollEnabled(false)}
+                onDragEnd={() => setScrollEnabled(true)}
               />
 
               <Button
@@ -372,6 +397,44 @@ export default function AudioEditorScreen() {
               })}
             </Card>
 
+            {/* Voice & Noise */}
+            <Card style={styles.section}>
+              <Text style={styles.sectionTitle}>Voice & Noise</Text>
+
+              <Text style={styles.sectionHint}>Voice</Text>
+              <View style={styles.voiceRow}>
+                {VOICE_OPTIONS.map((opt) => {
+                  const selected = voicePreset === opt.value;
+                  return (
+                    <TouchableOpacity
+                      key={opt.value}
+                      onPress={() => setVoicePreset(opt.value)}
+                      style={[styles.voiceChip, selected && styles.voiceChipSelected]}
+                    >
+                      <Text style={[styles.voiceChipText, selected && styles.voiceChipTextSelected]}>
+                        {opt.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={styles.tinyHint}>
+                Pitch-shifts the whole result — a fun effect, not a true voice swap.
+              </Text>
+
+              <View style={[styles.rowBetween, { marginTop: 10 }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.sectionHint}>Reduce background noise</Text>
+                  <Text style={styles.tinyHint}>Runs the result through a noise-reduction filter.</Text>
+                </View>
+                <Switch
+                  value={reduceNoise}
+                  onValueChange={setReduceNoise}
+                  trackColor={{ true: Colors.primary }}
+                />
+              </View>
+            </Card>
+
             {/* Save */}
             <Card style={styles.section}>
               <Text style={styles.sectionTitle}>Save</Text>
@@ -436,6 +499,21 @@ const styles = StyleSheet.create({
   muteBtn: { padding: 2 },
   volumeSlider: { flex: 1, height: 30 },
   volumeLabel: { fontSize: 11, color: Colors.textMuted, minWidth: 34, textAlign: 'right' },
+
+  voiceRow: { flexDirection: 'row', gap: 8, marginTop: 4, flexWrap: 'wrap' },
+  voiceChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: Colors.border,
+  },
+  voiceChipSelected: {
+    borderColor: Colors.primary,
+    backgroundColor: Colors.primary + '15',
+  },
+  voiceChipText: { fontSize: 12, fontWeight: '600', color: Colors.textSecondary },
+  voiceChipTextSelected: { color: Colors.primary },
 
   progressTrack: {
     height: 6,

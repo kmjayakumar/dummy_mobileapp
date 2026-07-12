@@ -54,6 +54,8 @@ export default function PlaybackBar({
   size = 'compact',
   showSpeed = false,
   knownDurationMillis = 0,
+  onDragStart,
+  onDragEnd,
 }) {
   const isActive  = player.playingUri === uri;
   const isPlaying = isActive && player.isPlaying;
@@ -79,10 +81,15 @@ export default function PlaybackBar({
     player.seekBy(uri, SKIP_MS);
   }, [player, uri]);
 
+  const handleSlidingStart = useCallback(() => {
+    onDragStart?.();
+  }, [onDragStart]);
+
   const handleSlidingComplete = useCallback((value) => {
     setDragValue(null);
     player.seek(uri, value);
-  }, [player, uri]);
+    onDragEnd?.();
+  }, [player, uri, onDragEnd]);
 
   const handleCycleSpeed = useCallback(() => {
     const idx = SPEED_CYCLE.indexOf(rate);
@@ -150,6 +157,7 @@ export default function PlaybackBar({
             maximumTrackTintColor={trackColor}
             thumbTintColor={color}
             disabled={disabled}
+            onSlidingStart={handleSlidingStart}
             onValueChange={setDragValue}
             onSlidingComplete={handleSlidingComplete}
           />
@@ -177,6 +185,7 @@ export default function PlaybackBar({
           maximumTrackTintColor={trackColor}
           thumbTintColor={color}
           disabled={disabled}
+          onSlidingStart={handleSlidingStart}
           onValueChange={setDragValue}
           onSlidingComplete={handleSlidingComplete}
         />
