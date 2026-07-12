@@ -397,11 +397,9 @@ export default function AudioEditorScreen() {
               })}
             </Card>
 
-            {/* Voice & Noise */}
+            {/* Voice */}
             <Card style={styles.section}>
-              <Text style={styles.sectionTitle}>Voice & Noise</Text>
-
-              <Text style={styles.sectionHint}>Voice</Text>
+              <Text style={styles.sectionTitle}>Voice</Text>
               <View style={styles.voiceRow}>
                 {VOICE_OPTIONS.map((opt) => {
                   const selected = voicePreset === opt.value;
@@ -419,13 +417,18 @@ export default function AudioEditorScreen() {
                 })}
               </View>
               <Text style={styles.tinyHint}>
-                Pitch-shifts the whole result — a fun effect, not a true voice swap.
+                Pitch-shifts the whole result — a fun effect, not a true voice swap. "Original" applies no change.
               </Text>
+            </Card>
 
-              <View style={[styles.rowBetween, { marginTop: 10 }]}>
+            {/* Noise Reduction — separate, off by default, opt-in only */}
+            <Card style={styles.section}>
+              <View style={styles.rowBetween}>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.sectionHint}>Reduce background noise</Text>
-                  <Text style={styles.tinyHint}>Runs the result through a noise-reduction filter.</Text>
+                  <Text style={styles.sectionTitle}>Noise Reduction</Text>
+                  <Text style={styles.tinyHint}>
+                    Off by default. Turn on only if this recording has background hiss/noise.
+                  </Text>
                 </View>
                 <Switch
                   value={reduceNoise}
