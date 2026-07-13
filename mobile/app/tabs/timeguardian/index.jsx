@@ -253,7 +253,7 @@ function BlockRow({ block, onPress }) {
 
 // ─── Day section ─────────────────────────────────────────────────────────────
 
-function DaySection({ dateStr, anchorDate, customBlocks, workHours, rotationSchedule, onBlockPress }) {
+function DaySection({ dateStr, anchorDate, customBlocks, workHours, rotationSchedule, onBlockPress, onDayPress }) {
   const today   = todayStr();
   const isToday = dateStr === today;
   const blocks  = useMemo(
@@ -264,7 +264,7 @@ function DaySection({ dateStr, anchorDate, customBlocks, workHours, rotationSche
   const d       = (() => { const [y,m,day] = dateStr.split('-').map(Number); return new Date(y,m-1,day); })();
 
   return (
-    <View style={[styles.dayCard, isToday && styles.dayCardToday]}>
+    <TouchableOpacity style={[styles.dayCard, isToday && styles.dayCardToday]} onPress={onDayPress} activeOpacity={0.85}>
       <View style={styles.dayHeader}>
         <Text style={[styles.dayName, isToday && { color: TGColors.gold }]}>
           {DAY_LABELS_FULL[d.getDay()]}
@@ -277,7 +277,8 @@ function DaySection({ dateStr, anchorDate, customBlocks, workHours, rotationSche
       {visible.length === 0
         ? <Text style={styles.openText}>open — nothing claimed yet</Text>
         : visible.map((b, i) => <BlockRow key={i} block={b} onPress={onBlockPress} />)}
-    </View>
+      <Text style={styles.dayTapHint}>Tap to view & add tasks →</Text>
+    </TouchableOpacity>
   );
 }
 
@@ -520,6 +521,7 @@ export default function TimeGuardianHome() {
             workHours={workHours}
             rotationSchedule={rotationSchedule}
             onBlockPress={setSelectedBlock}
+            onDayPress={() => router.push({ pathname: '/tabs/timeguardian/day', params: { date: d } })}
           />
         ))}
       </ScrollView>

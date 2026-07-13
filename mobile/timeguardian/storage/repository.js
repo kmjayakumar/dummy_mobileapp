@@ -1,7 +1,6 @@
 /**
  * repository.js
- * Local-first storage using AsyncStorage.
- * Added: ScheduleChangeLog — records every work hours / rotation schedule change with reason.
+ * Added: DailyTask CRUD — one-off and recurring tasks inside days.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -14,6 +13,8 @@ const KEYS = {
   WORK_HOURS         : 'tg:workHours',
   ROTATION_SCHEDULE  : 'tg:rotationSchedule',
   SCHEDULE_CHANGE_LOG: 'tg:scheduleChangeLog',
+  DAILY_TASKS        : 'tg:dailyTasks',
+  RECURRING_TASKS    : 'tg:recurringTasks',
 };
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
@@ -44,7 +45,6 @@ export async function getRotationAnchor() {
   try { const v = await AsyncStorage.getItem(KEYS.ROTATION_ANCHOR); return v ? JSON.parse(v) : null; }
   catch { return null; }
 }
-
 export async function setRotationAnchor(anchorDate) {
   try { await AsyncStorage.setItem(KEYS.ROTATION_ANCHOR, JSON.stringify({ anchor_date: anchorDate })); return true; }
   catch { return false; }
@@ -56,7 +56,6 @@ export async function getWorkHours() {
   try { const v = await AsyncStorage.getItem(KEYS.WORK_HOURS); return v ? JSON.parse(v) : DEFAULT_WORK_HOURS; }
   catch { return DEFAULT_WORK_HOURS; }
 }
-
 export async function saveWorkHours(workHours) {
   try { await AsyncStorage.setItem(KEYS.WORK_HOURS, JSON.stringify(workHours)); return true; }
   catch { return false; }
@@ -68,45 +67,25 @@ export async function getRotationSchedule() {
   try { const v = await AsyncStorage.getItem(KEYS.ROTATION_SCHEDULE); return v ? JSON.parse(v) : DEFAULT_ROTATION_SCHEDULE; }
   catch { return DEFAULT_ROTATION_SCHEDULE; }
 }
-
 export async function saveRotationSchedule(schedule) {
   try { await AsyncStorage.setItem(KEYS.ROTATION_SCHEDULE, JSON.stringify(schedule)); return true; }
   catch { return false; }
 }
-
 export async function updateRotationSlot(index, changes) {
   const schedule = await getRotationSchedule();
-  const updated  = schedule.map((s) => (s.index === index ? { ...s, ...changes } : s));
-  return saveRotationSchedule(updated);
+  return saveRotationSchedule(schedule.map((s) => (s.index === index ? { ...s, ...changes } : s)));
 }
 
 // ─── Schedule Change Log ──────────────────────────────────────────────────────
-// Every work hours or rotation schedule change is recorded here with a reason.
-// This is separate from LogEntries (which tracks time requests).
 
 export async function getScheduleChangeLog() {
   try { const v = await AsyncStorage.getItem(KEYS.SCHEDULE_CHANGE_LOG); return v ? JSON.parse(v) : []; }
   catch { return []; }
 }
-
-/**
- * Appends one entry to the schedule change log.
- * @param {'work_hours'|'rotation_slot'|'anchor_date'} field
- * @param {any} oldValue
- * @param {any} newValue
- * @param {string} reason - user-entered reason, required
- */
 export async function addScheduleChangeLog(field, oldValue, newValue, reason) {
   try {
-    const log     = await getScheduleChangeLog();
-    const entry   = {
-      id       : `tg_scl_${Date.now()}`,
-      field,
-      oldValue,
-      newValue,
-      reason,
-      changedAt: new Date().toISOString(),
-    };
+    const log   = await getScheduleChangeLog();
+    const entry = { id: `tg_scl_${Date.now()}`, field, oldValue, newValue, reason, changedAt: new Date().toISOString() };
     await AsyncStorage.setItem(KEYS.SCHEDULE_CHANGE_LOG, JSON.stringify([entry, ...log]));
     return entry;
   } catch { return null; }
@@ -122,30 +101,126 @@ export async function getCustomBlocks() {
     return DEFAULT_CUSTOM_BLOCKS;
   } catch { return DEFAULT_CUSTOM_BLOCKS; }
 }
-
 export async function saveCustomBlocks(blocks) {
   try { await AsyncStorage.setItem(KEYS.CUSTOM_BLOCKS, JSON.stringify(blocks)); return true; }
   catch { return false; }
 }
-
 export async function addCustomBlock(block) {
-  const blocks = await getCustomBlocks();
-  return saveCustomBlocks([...blocks, { ...block, id: `tg_cb_${Date.now()}`, active: true }]);
+  return saveCustomBlocks([...await getCustomBlocks(), { ...block, id: `tg_cb_${Date.now()}`, active: true }]);
 }
-
 export async function updateCustomBlock(id, changes) {
-  const blocks = await getCustomBlocks();
-  return saveCustomBlocks(blocks.map((b) => (b.id === id ? { ...b, ...changes } : b)));
+  return saveCustomBlocks((await getCustomBlocks()).map((b) => (b.id === id ? { ...b, ...changes } : b)));
 }
-
 export async function deleteCustomBlock(id) {
-  const blocks = await getCustomBlocks();
-  return saveCustomBlocks(blocks.filter((b) => b.id !== id));
+  return saveCustomBlocks((await getCustomBlocks()).filter((b) => b.id !== id));
+}
+export async function toggleCustomBlockActive(id) {
+  return saveCustomBlocks((await getCustomBlocks()).map((b) => (b.id === id ? { ...b, active: !b.active } : b)));
 }
 
-export async function toggleCustomBlockActive(id) {
-  const blocks = await getCustomBlocks();
-  return saveCustomBlocks(blocks.map((b) => (b.id === id ? { ...b, active: !b.active } : b)));
+// ─── DailyTasks (one-off tasks for a specific date) ──────────────────────────
+
+/**
+ * DailyTask shape:
+ * {
+ *   id, title, date (YYYY-MM-DD), time (HH:MM),
+ *   duration (minutes, optional), category,
+ *   note, done, protected
+ * }
+ */
+
+export async function getDailyTasks() {
+  try { const v = await AsyncStorage.getItem(KEYS.DAILY_TASKS); return v ? JSON.parse(v) : []; }
+  catch { return []; }
+}
+
+export async function getDailyTasksForDate(date) {
+  const all = await getDailyTasks();
+  return all.filter((t) => t.date === date).sort((a, b) => (a.time < b.time ? -1 : 1));
+}
+
+export async function addDailyTask(task) {
+  try {
+    const tasks   = await getDailyTasks();
+    const newTask = { id: `tg_dt_${Date.now()}`, done: false, protected: false, ...task };
+    await AsyncStorage.setItem(KEYS.DAILY_TASKS, JSON.stringify([...tasks, newTask]));
+    return newTask;
+  } catch { return null; }
+}
+
+export async function updateDailyTask(id, changes) {
+  try {
+    const tasks   = await getDailyTasks();
+    const updated = tasks.map((t) => (t.id === id ? { ...t, ...changes } : t));
+    await AsyncStorage.setItem(KEYS.DAILY_TASKS, JSON.stringify(updated));
+    return true;
+  } catch { return false; }
+}
+
+export async function deleteDailyTask(id) {
+  try {
+    const tasks = await getDailyTasks();
+    await AsyncStorage.setItem(KEYS.DAILY_TASKS, JSON.stringify(tasks.filter((t) => t.id !== id)));
+    return true;
+  } catch { return false; }
+}
+
+// ─── RecurringTasks (repeat on selected weekdays) ─────────────────────────────
+
+/**
+ * RecurringTask shape:
+ * {
+ *   id, title, days ([0..6]), time (HH:MM),
+ *   duration (minutes, optional), category,
+ *   note, protected, active
+ * }
+ */
+
+export async function getRecurringTasks() {
+  try { const v = await AsyncStorage.getItem(KEYS.RECURRING_TASKS); return v ? JSON.parse(v) : []; }
+  catch { return []; }
+}
+
+export async function addRecurringTask(task) {
+  try {
+    const tasks   = await getRecurringTasks();
+    const newTask = { id: `tg_rt_${Date.now()}`, done: false, protected: false, active: true, ...task };
+    await AsyncStorage.setItem(KEYS.RECURRING_TASKS, JSON.stringify([...tasks, newTask]));
+    return newTask;
+  } catch { return null; }
+}
+
+export async function updateRecurringTask(id, changes) {
+  try {
+    const tasks   = await getRecurringTasks();
+    const updated = tasks.map((t) => (t.id === id ? { ...t, ...changes } : t));
+    await AsyncStorage.setItem(KEYS.RECURRING_TASKS, JSON.stringify(updated));
+    return true;
+  } catch { return false; }
+}
+
+export async function deleteRecurringTask(id) {
+  try {
+    const tasks = await getRecurringTasks();
+    await AsyncStorage.setItem(KEYS.RECURRING_TASKS, JSON.stringify(tasks.filter((t) => t.id !== id)));
+    return true;
+  } catch { return false; }
+}
+
+export async function toggleRecurringTaskActive(id) {
+  const tasks = await getRecurringTasks();
+  return updateRecurringTask(id, { active: !tasks.find((t) => t.id === id)?.active });
+}
+
+/**
+ * Returns all active recurring tasks that apply to a given day-of-week.
+ * @param {number} dayOfWeek 0=Sun…6=Sat
+ */
+export async function getRecurringTasksForDay(dayOfWeek) {
+  const all = await getRecurringTasks();
+  return all
+    .filter((t) => t.active && Array.isArray(t.days) && t.days.includes(dayOfWeek))
+    .sort((a, b) => (a.time < b.time ? -1 : 1));
 }
 
 // ─── LogEntries ───────────────────────────────────────────────────────────────
@@ -154,7 +229,6 @@ export async function getLogEntries() {
   try { const v = await AsyncStorage.getItem(KEYS.LOG_ENTRIES); return v ? JSON.parse(v) : []; }
   catch { return []; }
 }
-
 export async function addLogEntry(entry) {
   try {
     const entries  = await getLogEntries();
@@ -163,7 +237,6 @@ export async function addLogEntry(entry) {
     return newEntry;
   } catch { return null; }
 }
-
 export async function getRecentLogEntries(limit = 40) {
   return (await getLogEntries()).slice(0, limit);
 }
@@ -174,7 +247,6 @@ export async function getEnergyEntries() {
   try { const v = await AsyncStorage.getItem(KEYS.ENERGY_ENTRIES); return v ? JSON.parse(v) : []; }
   catch { return []; }
 }
-
 export async function upsertEnergyEntry(date, time, level, cause = null) {
   try {
     const entries  = await getEnergyEntries();
@@ -185,7 +257,6 @@ export async function upsertEnergyEntry(date, time, level, cause = null) {
     return newEntry;
   } catch { return null; }
 }
-
 export async function getEnergyChartData(days = 7) {
   const entries = await getEnergyEntries();
   const byDate  = {};
